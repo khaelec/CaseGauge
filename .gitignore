@@ -1,0 +1,21 @@
+# Build output and caches - regenerated, never committed.
+cache/
+__pycache__/
+build/
+dist/
+*.spec
+
+# Machine-local state: this is per-PC data, not source.
+state.json
+kiosk.json
+casegauge.json
+CaseGauge.log
+diag.log
+PCMonitor.log
+
+# The built executable ships via GitHub Releases, not the repository.
+CaseGauge.exe
+PCMonitor.exe
+
+# A re-encoded wallpaper cache can be very large (100+ MB); already covered
+# above by cache/, kept here as a reminder.

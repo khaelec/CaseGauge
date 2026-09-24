@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CaseGauge</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+
+<!-- Add to Home Screen: no Safari chrome, own icon, full bleed. -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="CaseGauge">
+<meta name="theme-color" content="#05070d">
+
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" href="apple-touch-icon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<canvas id="wallpaper" aria-hidden="true"></canvas>
+<video id="wallpaper-video" hidden aria-hidden="true"
+       muted loop playsinline autoplay preload="auto"></video>
+<iframe id="wallpaper-web" hidden aria-hidden="true" title="Live wallpaper"
+        sandbox="allow-scripts allow-same-origin"></iframe>
+<div class="vignette" aria-hidden="true"></div>
+
+<main id="dash">
+
+  <header class="bar">
+    <div class="bar-right">
+      <div id="status" class="status" data-state="connecting">
+        <span class="dot"></span><span id="status-text">connecting</span>
+      </div>
+      <span class="zoom">
+        <button id="zoom-out" class="ghost-btn" type="button"
+                title="Smaller (-)" aria-label="Smaller">&minus;</button>
+        <button id="zoom-reset" class="ghost-btn zoom-val" type="button"
+                title="Reset zoom (0)" aria-label="Reset zoom">100%</button>
+        <button id="zoom-in" class="ghost-btn" type="button"
+                title="Bigger (+)" aria-label="Bigger">+</button>
+      </span>
+      <button id="pick-open" class="ghost-btn" type="button">Wallpaper</button>
+      <button id="layout-open" class="ghost-btn" type="button">Layout</button>
+      <button id="fs-toggle" class="ghost-btn" type="button" hidden
+              title="Fullscreen (F)" aria-label="Toggle fullscreen">&#9974;</button>
+    </div>
+  </header>
+
+  <section class="cards">
+
+    <article class="card" id="card-cpu" data-card="cpu">
+      <div class="card-head">
+        <h2>CPU</h2>
+        <p class="sub" id="cpu-name">&nbsp;</p>
+      </div>
+      <div class="readout">
+        <span class="temp" data-row="temp">
+          <span class="value" id="cpu-temp">--</span><span class="unit">&deg;C</span>
+        </span>
+        <div class="cores" id="cpu-cores" data-row="cores"></div>
+      </div>
+      <div class="side">
+        <div class="meters">
+          <div class="meter" data-row="load">
+            <div class="meter-label"><span>Load</span><span id="cpu-load-text">--%</span></div>
+            <div class="track"><div class="fill" id="cpu-load-bar"></div></div>
+          </div>
+        </div>
+      </div>
+    </article>
+
+    <article class="card" id="card-gpu" data-card="gpu">
+      <div class="card-head">
+        <h2>GPU</h2>
+        <p class="sub" id="gpu-name">&nbsp;</p>
+      </div>
+      <div class="readout">
+        <span class="temp" data-row="temp">
+          <span class="value" id="gpu-temp">--</span><span class="unit">&deg;C</span>
+        </span>
+      </div>
+      <div class="side">
+        <div class="meters">
+          <div class="meter" data-row="load">
+            <div class="meter-label"><span>Load</span><span id="gpu-load-text">--%</span></div>
+            <div class="track"><div class="fill" id="gpu-load-bar"></div></div>
+          </div>
+          <div class="meter" data-row="vram">
+            <div class="meter-label"><span>VRAM</span><span id="vram-text">--</span></div>
+            <div class="track"><div class="fill" id="vram-bar"></div></div>
+          </div>
+        </div>
+        <div class="chips" data-row="chips">
+          <span class="chip"><b id="gpu-power">--</b> W</span>
+          <span class="chip"><b id="gpu-fan">--</b> % fan</span>
+          <span class="chip"><b id="gpu-junction">--</b> &deg;C junction</span>
+        </div>
+      </div>
+    </article>
+
+    <article class="card" id="card-ram" data-card="ram">
+      <div class="card-head">
+        <h2>Memory</h2>
+        <p class="sub" id="ram-sub">&nbsp;</p>
+      </div>
+      <div class="readout">
+        <span class="temp" data-row="temp">
+          <span class="value" id="ram-used">--</span><span class="unit">GB</span>
+        </span>
+      </div>
+      <div class="side">
+        <div class="meters">
+          <div class="meter" data-row="load">
+            <div class="meter-label"><span>In use</span><span id="ram-pct-text">--%</span></div>
+            <div class="track"><div class="fill" id="ram-bar"></div></div>
+          </div>
+        </div>
+        <div class="chips" data-row="free">
+          <span class="chip"><b id="ram-free">--</b> GB free</span>
+        </div>
+      </div>
+      <div class="chips drives" id="disk-chips" data-row="drives"></div>
+    </article>
+
+  </section>
+
+  <p id="hint" class="hint"></p>
+
+</main>
+
+<div id="picker" class="picker" hidden>
+  <div class="picker-panel" role="dialog" aria-label="Choose a wallpaper">
+    <div class="picker-head">
+      <h2>Wallpaper</h2>
+      <span id="pick-count" class="picker-count"></span>
+      <button id="pick-close" class="ghost-btn" type="button">Done</button>
+    </div>
+    <div id="pick-grid" class="picker-grid"></div>
+    <p id="pick-note" class="picker-note"></p>
+  </div>
+</div>
+
+<div id="layout" class="picker" hidden>
+  <div class="picker-panel" role="dialog" aria-label="Edit layout">
+    <div class="picker-head">
+      <h2>Layout</h2>
+      <span class="picker-count"></span>
+      <button id="layout-reset" class="ghost-btn" type="button">Reset</button>
+      <button id="layout-close" class="ghost-btn" type="button">Done</button>
+    </div>
+    <div id="layout-list" class="layout-list"></div>
+    <p class="picker-note">Order and visibility live on the PC and reach every
+      viewer within a second. Untick a card to hide it; use the arrows to
+      reorder.</p>
+  </div>
+</div>
+
+<script src="wallpaper.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

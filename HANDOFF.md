@@ -1,0 +1,437 @@
+﻿# Handoff
+
+*Written for: an agent picking this project up cold.*
+
+Read `README.md` for how the thing works and how to run it. This file covers
+what is **unresolved**, what has already been **ruled out**, and the
+environment facts that are expensive to rediscover.
+
+---
+
+## Project identity
+
+The app is called **CaseGauge** (renamed from "PC Monitor" on 2026-09-23). The
+exe is `CaseGauge.exe`, the log `CaseGauge.log`, the tray window class
+`CaseGaugeTray`. Licensing artifacts now exist: `LICENSE` (Apache-2.0),
+`THIRD-PARTY-NOTICES.md`, `REQUIREMENTS.md` (the public-release checklist), and
+`assets/` (multi-size icon + Home Screen artwork). The tray loads
+`assets/icon.ico` via `LoadImageW`; the old `shell32.dll` icon extraction is
+gone. `assets/icon.ico` resolves relative to the exe, so `assets/` must ship
+beside it like `web/`.
+
+**Port.** `_load_port()` resolves `--port` → `PCSTATS_PORT` → `casegauge.json`
+`{"port": N}` → 8777. `casegauge.json` is read with `utf-8-sig`, because a
+hand-edited file (Notepad/PowerShell) usually carries a BOM that plain
+`json.load` rejects. `kiosk.ps1` resolves the port the same way. One server
+serves every client, so multiple devices do **not** need multiple ports.
+
+**Client platforms.** The server is always the PC; there is no Android build.
+The page is deliberately platform-agnostic: `apple-touch-icon` for iOS, a
+manifest would be added for Android, the wake lock is **feature-detected**, and
+fonts fall back in CSS. Do not add UA sniffing to branch behaviour. Note the
+Wake Lock API needs a secure context (HTTPS), so on Android over plain LAN HTTP
+the screen will sleep and users need a kiosk browser (documented in the README).
+That also implies the iPad's wake lock may not actually be engaging over HTTP —
+check whether Auto-Lock is simply off.
+
+## What this is
+
+A PC stats dashboard (CPU/GPU/RAM) with a live wallpaper, served from a
+Windows PC and viewed in **Safari on an iPad 6**, added to the Home Screen.
+
+It replaced spacedesk, which is now **uninstalled** â€” do not reintroduce a
+dependency on it. The iPad is a browser client on the LAN, not a display.
+
+Everything is Python **standard library only**. No pip packages. Keep it that
+way unless the user asks otherwise; it is the reason the server is ~31 MB.
+
+---
+
+## Environment (verified, not assumed)
+
+| | |
+|---|---|
+| Project | `E:\Ipad` |
+| Python | 3.12.10 at `%LOCALAPPDATA%\Programs\Python\Python312` |
+| CPU / GPU / RAM | Ryzen 7 5700X3D Â· RTX 5070 Ti Â· 32 GB |
+| Displays | DISPLAY1 5120Ã—1440 primary, DISPLAY2 1350Ã—2400 portrait. **Windows is at 125% scale** |
+| iPad | 6th gen, Lightning, iPadOS 17.7.x (caps there), panel 2048Ã—1536, `devicePixelRatio` 2 â†’ **CSS viewport 1024Ã—768 / 768Ã—1024** |
+| LAN | PC wired, `192.168.2.20`. Dashboard at `http://192.168.2.20:8777/` |
+| Firewall | **No rule needed.** Windows already has inbound Allow rules for `python.exe`/`pythonw.exe` on the Private profile. Verified `Inbound/Allow/Enabled/Private`. |
+
+**LibreHardwareMonitor** â€” CPU temperature only. Installed by winget as a
+*portable* package (no Start Menu entry by default; a shortcut was added):
+
+```
+%LOCALAPPDATA%\Microsoft\WinGet\Packages\LibreHardwareMonitor.LibreHardwareMonitor_Microsoft.Winget.Source_8wekyb3d8bbwe\
+```
+
+It self-elevates, writes its config on exit, and is already configured to start
+minimised with its web server on `127.0.0.1:8085`. It does **not** auto-start at
+logon â€” the scheduled-task command is in `README.md` and the user has to run it
+elevated themselves (agents are blocked from registering it).
+
+**ffmpeg** â€” winget `Gyan.FFmpeg`, found via `wallpapers.find_ffmpeg()` because
+the winget shim is not on PATH until a new shell. NVENC confirmed working.
+
+**Wallpaper Engine library** â€” `D:\SteamLibrary\steamapps\workshop\content\431960`,
+70 items: 16 video, 4 web, 49 scene, 1 unknown. Scene and application types are
+**not usable** â€” proprietary format, only WE's own renderer reads them.
+
+---
+
+## Open issues
+
+### 1. Layout jitter â€” SOLVED, confirmed on the device
+
+The long-running "numbers make everything jump" bug. It had nothing to do with
+the numbers.
+
+`web/app.js` contains a **layout-shift watchdog** that samples key rows every
+animation frame and POSTs anything that moves to `/api/diag`, which the server
+appends to `diag.log`. That exists because the display is an iPad mounted
+inside the PC case: it cannot be reached, cannot be filmed, and the shift never
+reproduced in headless Chromium. The page had to measure itself.
+
+It caught the cause in a single correlated frame:
+
+```
+cards     826.5 -> 826.5    +0.0     <- container fixed
+cpuCard   195.2 -> 220.1   +24.9
+gpuCard   289.1 -> 314.0   +24.9
+ramCard   314.6 -> 264.8   -49.8
+...every child:            +0.0
+```
+
+The three cards were **trading height with each other** inside a fixed
+container while nothing inside them changed size. `.cards` used
+`grid-auto-rows: auto`, so rows sized themselves from content and shared the
+leftover space; any nudge re-ran that distribution across all three.
+
+Fixed with explicit `grid-template-rows` fractions (portrait:
+`0.78fr 1.15fr 1.07fr` - the GPU card carries more content so it gets more
+room). A row's height can no longer depend on anything inside it or inside its
+siblings. `diag.log` has been empty since.
+
+**Keep the watchdog.** It costs four rects per frame, reports at most once per
+20s and only when something moved, and it is the only diagnostic channel that
+exists for this display. If layout regresses, it will say so without anyone
+having to look at the iPad. It now **re-baselines on a viewport change**, so a
+rotation - or a headless test resizing the window - no longer posts a
+false-positive full-screen report that looks like the bug returning.
+
+Dead ends, for the record - none of these were the cause:
+`font-variant-numeric: tabular-nums` (a verified **no-op** in this font stack;
+`"44"` is 161.2px and `"45"` 158.2px, identical with and without
+`font-feature-settings: "tnum"`), `-webkit-text-size-adjust`, caching, and
+zoom. Fixed-width digit boxes and in-place text-node updates went in along the
+way and are worth keeping, but they were not the bug.
+
+### 1c. Built: per-core square and user-editable layout
+
+Both landed. Summary of what exists, and the traps worth keeping.
+
+**Per-core load.** `server.py:read_cpu_cores()` calls `NtQuerySystemInformation`
+with `SystemProcessorPerformanceInformation` (class 8) - `GetSystemTimes` is
+totals only - and returns one busy percent per **logical processor** (16 here).
+Same delta arithmetic as `read_cpu_load()`. No admin. It rides on
+`/api/stats` as `cpu.cores`. Note `ntdll.NtQuerySystemInformation` **must** have
+explicit `argtypes`: without them ctypes passes the buffer as a C int, truncates
+the pointer on 64-bit and faults inside the kernel.
+
+Drawn as a **square** the same height as the headline number, sitting to the
+**right** of the CPU temperature (`web/index.html`, `.cores` in `style.css`,
+`setCores` in `app.js`). It is 2 columns x 8 rows of fixed tracks; only the
+fill width changes, so it cannot resize the card. Two reasons it is on the
+right, not the left gutter originally sketched: on the left it pushed the CPU
+number off the shared left edge, so the three headline numbers no longer
+matched. `.cores:empty` hides it when there is no data, and the layout owns
+`hidden` - `setCores` never touches it.
+
+**Layout.** A `layout` key in `state.json` - an ordered list of
+`{id, rows[]}`. Cards absent from the list are hidden; list order is screen
+order. `get_ui()` rides it on `/api/stats`; the page adopts it in `paint()` and
+writes edits to `POST /api/layout/select` (JSON body, because it is nested).
+The tray has **Layout â–¸** (per card: show, row ticks, move up/down), and the
+page has a **Layout** overlay for when the dashboard is open on the PC.
+
+**The trap, and why it is minmax(0, fr).** `web/style.css` `.cards` and
+`fitGrid()` in `app.js` use `minmax(0, 1fr)` / `minmax(0, Xfr)` everywhere -
+**never a bare `fr`**. A bare `fr` is `minmax(auto, fr)`, and the CPU card's
+min-content width (number + per-core square) is wider than an equal share, so
+with `repeat(3, 1fr)` the landscape columns came out 425/305/237 instead of
+equal - the exact "mismatched cards" symptom. `minmax(0, ...)` pins the minimum
+and restores equal columns. The grid template is regenerated in JS from the
+**visible** cards (`fitGrid()`), never left to the media query alone, because a
+hidden card is `display:none` and not a grid item at all. It is still always
+explicit fractions - never `auto` - so the layout-jitter fix (issue 1) holds.
+`diag.log` stayed empty through the change.
+
+`web/` needs no rebuild; `server.py`/`tray.py` do. Both were rebuilt and the
+exe restarted on 2026-09-23.
+
+Still open from the original sketch: the tray menu's **text-invisible** bug
+(issue 2) also affects the new Layout submenu, which is why the on-page overlay
+exists as the reliable control surface.
+
+
+### 1d. Old issue 1 (historical)
+
+The user reported repeatedly that the layout shifts when values update. Three
+rounds of fixes went in. **The user's last "it's still happening" arrived before
+the third fix landed, so the current build has not been confirmed on device.**
+
+**First thing to do: ask for the build stamp.** It is shown in the wallpaper
+picker next to the wallpaper count, and in `<span id="build">`. If it does not
+match `build_stamp()` on the server, they are on stale code and nothing else
+matters.
+
+What went in, in order:
+
+1. **Fixed-width digit boxes** (`setNum` in `app.js`, `.dig`/`.pt` in
+   `style.css`) â€” each digit gets its own box so which digits are shown cannot
+   change an element's width.
+2. **`-webkit-text-size-adjust: 100%`** â€” iOS Safari inflates text on pages it
+   judges non-responsive and re-runs that heuristic as content changes. This is
+   Safari-only and *cannot be reproduced in headless Chromium*, which is why it
+   survived several rounds of clean measurements. This is the most likely true
+   cause; the user's wording was "font sizes causing things to move".
+3. **Structural rigidity** â€” the real miss. `.hint` shares the flex column with
+   `.cards`, so a wallpaper-progress message appearing resized every card.
+   `.chips` could wrap to a second line. `.readout` used auto margins, which
+   are computed from sibling heights, so anything changing below moved the big
+   number above. All now fixed-size or `flex: 0 0 auto`.
+
+**Do not** try to fix this with `font-variant-numeric: tabular-nums`. It is
+already set and it is a **verified no-op** in this font stack: measured at
+140px, `"44"` is 161.2px and `"45"` is 158.2px, *identical* with and without
+`font-feature-settings: "tnum" 1`. The font has no tabular figures.
+
+Also ruled out: caching (now impossible, see below), and zoom (the user
+suspected it; it is not the cause).
+
+If it persists on a confirmed-current build, next suspects:
+- `vw`-based `clamp()` font sizes reacting to something viewport-related in
+  standalone mode
+- the `applyZoom` fit-loop running more than once (it mutates `--s` in a
+  `while` loop and each iteration reflows)
+- font swap after load (`ui-rounded` resolving late)
+
+Ask the user **which** element moves â€” clock, a percentage, the big number, or
+the whole block. That narrows it enormously and has not been established.
+
+### 1b. PC-side zoom not reaching the iPad â€” unresolved
+
+The user reports that changing zoom from the tray, or from the dashboard open
+on the PC, has no effect on the iPad.
+
+Verified working on the current build in a real browser, both directions:
+server -> page adoption (`/api/stats` carries `zoom`, `paint()` applies it) and
+page -> server writes (`/api/zoom/select`). So the mechanism is sound and the
+prime suspect is the same stale-cache problem as issue 1.
+
+A **real race was found and fixed** while testing this: clicking `+` three
+times left the page showing 140% while the server held 2.0. The 1 Hz poll can
+return the previous server value after a click has already moved on, which
+dragged `zoomWanted` backwards and made the next click compute from a stale
+base. `paint()` now ignores the server's zoom for `ZOOM_SETTLE_MS` (2.5s) after
+a local write. Retested: 3 clicks -> page 130%, server 1.3.
+
+Note `applyZoom` has a fit-clamp loop that reduces zoom until the layout fits.
+The clamped value is deliberately **not** written back to the server. If the
+iPad ever appears to ignore zoom *downward*, check whether `overflows()` is
+always true there (safe-area insets could do it) - that would clamp every
+request back down and look like "zoom does nothing".
+
+### 2. Tray icon: menu text invisible, and sometimes no icon at all
+
+Two related faults in `tray.py`, which is hand-rolled Win32 via `ctypes`.
+
+**Menu text invisible.** The user right-clicked the tray icon and got a menu
+with no visible text. The menu *data* is correct â€” verified by building the
+same menu and reading it back with `GetMenuStringW`:
+
+```
+[0] 'http://192.168.2.20:8777/'   [2] 'Open dashboard'
+[3] 'Copy iPad URL'               [4] 'Wallpaper'       [5] 'Quit'
+```
+
+So this is a **rendering** problem, not a data one. Prime suspect: the owner
+window is created with style `0` (not `WS_POPUP`, not visible) at 0Ã—0, and
+Windows may refuse to give it foreground, which breaks menu painting.
+`SetForegroundWindow` is already called before `TrackPopupMenu`. Try giving the
+window `WS_POPUP`, or use a real (offscreen) window.
+
+**Icon sometimes absent.** Under `pythonw`, `FindWindowW("CaseGaugeTray")`
+sometimes returns nothing while the server still serves â€” meaning `tray.run()`
+raised and `server.py` fell through to `serve_forever()` without a tray. The
+fallback is silent under `pythonw` (no stderr). Make the failure loud: write it
+to a log file rather than `print`.
+
+A genuine bug **was** found and fixed here: `DefWindowProcW` had no `argtypes`,
+so ctypes defaulted to C `int` and every pointer-sized `wparam`/`lparam` raised
+`OverflowError: int too long to convert` from inside the window procedure. That
+flooded the console under `start.bat` and was invisible under `pythonw`. All the
+Win32 functions now have explicit `argtypes`/`restype` â€” **keep it that way**;
+it is the single easiest way to reintroduce this class of bug.
+
+### 3. Waking from sleep â€” FIXED, needs confirming on device
+
+The user reported "the app doesn't come back when I wake from sleep". A real
+bug was found and fixed, in two parts.
+
+**WebGL context loss.** iOS discards the WebGL context while the device sleeps.
+There was no `webglcontextlost` / `webglcontextrestored` handling at all, so the
+render loop kept calling `drawArrays` into a dead context forever and the
+wallpaper stayed frozen on its last frame.
+
+**The subtler half**, and the reason the first attempt looked like it worked:
+`resize()` only did its setup when the canvas *dimensions changed*. After a
+context restore the canvas keeps its old width and height, so `resize()` did
+nothing, and `gl.viewport()` and the `u_res` uniform were never set on the new
+context. `u_res` stayed (0,0), the shader divided by zero, and the result was a
+renderer reporting "running" while displaying a static frame. The fix tracks
+`curW`/`curH` in module variables and resets them to -1 on context loss, rather
+than reading back from the canvas.
+
+Also added: `pageshow` / `focus` / `online` handlers (Safari can restore from
+bfcache without firing `visibilitychange`), video `error` recovery, and a
+`location.reload()` when the page has been visible and online with no
+successful poll for two minutes. A dashboard has no state worth preserving, so
+a clean reload beats trying to repair every subsystem.
+
+`canvas.dataset.gl` now carries the renderer state (`running` / `lost` /
+`restored` / `stalled` / `init-failed`). That is deliberate: page globals are
+unreachable from patchright's isolated world, so DOM is the only channel for
+observing internals â€” and it is useful when debugging on the iPad too.
+
+### 4. Orphan process
+
+The user's concern, and legitimate: under `pythonw` with no tray there is no
+window, no console and no taskbar button, so no way to stop the server.
+`stop.bat` now exists and is tested. If the tray is reworked, keep `stop.bat`
+as the guaranteed escape hatch.
+
+---
+
+## Not started, but discussed
+
+- **Video wallpaper sharpness.** `TARGET_HEIGHT = 768` in `wallpapers.py` was
+  chosen when spacedesk fed the iPad 960Ã—1280. Viewed directly the panel is
+  2048Ã—1536, so loops are ~2Ã— upscaled. Raising it to 1080 was offered and not
+  yet accepted: roughly double the file size (the 97 MB astronaut becomes
+  ~180 MB) and everything in `cache/` must be re-transcoded (just delete it).
+- **Sparklines.** A 60-second rolling history per card was offered twice and
+  never taken up.
+- **Extra sensors.** LHM exposes GPU Memory Junction (runs much hotter than GPU
+  core and is the number that matters on a 5070 Ti), CCD1, VRM MOS, SSD and
+  per-DIMM temperatures. Offered, not built.
+
+---
+
+## It is an exe now
+
+`CaseGauge.exe`, built with PyInstaller (see `README.md` for the command). It
+now bundles `web/` and `assets/` **inside** the onefile exe, so it ships as a
+single download. The resolution rule is in `server._resource_dir()`: a **local
+`web/` or `assets/` folder beside the exe wins**, otherwise it falls back to
+`sys._MEIPASS`. That keeps the live-edit workflow intact on a development
+machine while letting the released exe run alone. Writable state
+(`cache/`, `state.json`, `CaseGauge.log`) is always beside the exe. Verified by
+running the exe in an empty folder: index served, 16 cores, no errors.
+
+Two consequences that will catch you out:
+
+- **Changing `server.py`, `tray.py` or `wallpapers.py` requires a rebuild.**
+  Restarting the exe runs the *old* bundled code. This is the easiest way to
+  spend an hour debugging a fix that was never running.
+- **Changing anything in `web/` requires nothing.** Those files sit next to the
+  exe, are read per request, and bump the build stamp - which makes the iPad
+  reload itself within a second.
+
+`_HERE` is derived from `sys.executable` when `sys.frozen` is set, so `web/`,
+`cache/`, `state.json` and `CaseGauge.log` resolve beside the exe rather than
+in PyInstaller's temp extraction directory.
+
+**`CaseGauge.log`** is the only diagnostic channel: `--noconsole` means no
+stdout or stderr at all. It records tray startup and failures. Use `log()` in
+`server.py` for anything else you need to see.
+
+A warning about probes: `FindWindowW("CaseGaugeTray")` proved **unreliable** -
+it repeatedly reported the tray missing while it was demonstrably working. Do
+not conclude the tray is broken from that alone; check `CaseGauge.log` for
+`tray icon created`.
+
+## How to test
+
+Do **not** ask the user to eyeball things you can measure. There is a headless
+browser harness:
+
+```bash
+node "C:/Users/Ulrick/.claude/skills/browser-automation/browser.mjs" \
+     http://127.0.0.1:8777/ --script <script.mjs> --screenshot <out.png>
+```
+
+Reusable scripts live in the session scratchpad (regenerate if gone):
+`jitter2.mjs` samples leaf-element rects over time; `jitter3.mjs` forces
+worst-case digit counts; `reflow.mjs` exercises hint/chips/status changes.
+
+**Three traps that cost real time here:**
+
+0. `gl.readPixels` returns black after compositing unless the context was made
+   with `preserveDrawingBuffer: true`. To prove the shader is animating,
+   screenshot a wallpaper-only region twice and compare hashes â€” and leave a
+   generous gap, because the nebula drifts at `u_time * 0.055` and barely moves
+   in under a second.
+
+
+1. `page.evaluate` runs in an **isolated world** in patchright â€” page globals
+   like `window.Wallpaper` are *not* reachable. Assert on the DOM instead.
+   Doing so is better practice anyway: it tests what rendered.
+2. Measuring a **container** proves nothing about its children. The first
+   jitter fix looked complete because the test watched `.chips`, which is full
+   width and never moves, instead of the chips inside it.
+
+Also: `page.setViewportSize` needs a moment before rects settle. An early read
+made the canvas look like it had a stale aspect ratio when it did not.
+
+---
+
+## Things that will bite you
+
+- **Caching.** `index.html` is generated per request by `Handler._send_index`,
+  which stamps every asset URL with `build_stamp()` (newest mtime of the web
+  files) and sends `no-store`. Safari in standalone mode ignores `no-cache`
+  headers, so the URL itself has to change. Do not "simplify" this away.
+- **Web files vs Python files.** Editing `web/*` needs only a page reload.
+  Editing `server.py` / `tray.py` / `wallpapers.py` needs a server restart
+  (tray â†’ Quit, or `stop.bat`, then the Startup shortcut or `start.bat`).
+- **`allow_reuse_address`.** Deliberately `False` on the `Server` class. On
+  Windows `SO_REUSEADDR` lets two processes bind the *same* listening port, and
+  the dashboard then sees alternating stale readings. This actually happened.
+- **LHM fast-fail.** `read_cpu_temp()` does a 0.3s socket probe and backs off
+  15s when LHM is absent. Without it, a refused connect to `localhost` costs a
+  full timeout *per address family* and drags the 1 Hz loop to 4 seconds.
+- **`localhost` vs `127.0.0.1`.** Always the latter for LHM, same reason.
+- **Range requests.** iOS Safari will not play a `<video>` from a server that
+  ignores `Range`. `_send_file` implements it; `SimpleHTTPRequestHandler` does
+  not.
+- **DPI.** `kiosk.ps1` deliberately does **not** call `SetProcessDPIAware`. At
+  125% scale a DPI-aware process sees different coordinates than an unaware
+  one, and Chromium places windows in whatever space it is handed. Reading and
+  passing coordinates from the same unaware process keeps them consistent.
+- **Agent permission blocks.** Registering scheduled tasks and adding firewall
+  rules are refused as persistence/system changes. Hand the user the command.
+
+---
+
+## Working style the user expects
+
+- Measure, don't speculate. They responded well to being shown numbers
+  (`"44" 161.2px vs "45" 158.2px`) rather than told a theory.
+- Say plainly when something was wrong or incomplete. Two fixes here were
+  announced as complete and were not; admitting the test was flawed landed
+  better than re-asserting.
+- They are comfortable with admin steps and kernel drivers when the reason is
+  explained, and they care a lot about **RAM footprint** â€” the whole reason
+  spacedesk (~490 MB with Edge) was dropped for this (~31 MB).

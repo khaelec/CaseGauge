@@ -1,0 +1,1149 @@
+/* Dashboard logic: poll /api/stats, paint the numbers, keep the screen awake.
+ *
+ * Polling (not WebSocket) is deliberate - at 1 Hz the payload is ~200 bytes
+ * and plain fetch has far fewer failure modes than a socket that has to
+ * survive WiFi sleep, backgrounding and reconnects.
+ */
+(function () {
+  'use strict';
+
+  var POLL_MS = 1000;
+  var STALE_MS = 3500;   // no good reply for this long -> warn
+  var DOWN_MS = 8000;    // ...and this long -> mark it down
+
+  // Heat thresholds in Celsius: [warm, hot].
+  // The 5700X3D runs hot by design and only throttles in the 80s.
+  var CPU_HEAT = [65, 82];
+  var GPU_HEAT = [60, 78];
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  var lastGood = 0;
+  var everConnected = false;
+  var myBuild = (document.getElementById('build') || {}).textContent || '';
+  var wasDownLong = false;
+
+  // The hint line has two writers. Wallpaper progress is transient and wins
+  // while present; the sensor notice is the steady state underneath it.
+  var sensorHint = '';
+  var wallpaperHint = '';
+
+  function showHint() {
+    setText($('hint'), wallpaperHint || sensorHint);
+  }
+
+  function heat(value, limits) {
+    if (value === null || value === undefined) return '';
+    if (value >= limits[1]) return 'hot';
+    if (value >= limits[0]) return 'warm';
+    return 'cool';
+  }
+
+  function setText(el, text) {
+    if (el && el.textContent !== text) el.textContent = text;
+  }
+
+  function fmt(value, digits) {
+    if (value === null || value === undefined || isNaN(value)) return '--';
+    return value.toFixed(digits === undefined ? 0 : digits);
+  }
+
+  function setBar(el, percent, limits) {
+    if (!el) return;
+    var p = (percent === null || percent === undefined) ? 0 : percent;
+    el.style.width = Math.max(0, Math.min(100, p)) + '%';
+    if (limits) el.dataset.heat = heat(p, limits);
+  }
+
+  // The headline numbers get one fixed-width box per character.
+  //
+  // font-variant-numeric: tabular-nums does nothing here - the rounded system
+  // font has no tabular figures, so "4" renders 3px wider than "5" and the
+  // degree sign visibly hops every time a temperature ticks. Measured widths
+  // at 140px: "44" 161.2 vs "45" 158.2, identical with and without tnum.
+  // Boxing each glyph makes it stable on any font.
+  function charKind(ch) {
+    if (ch >= '0' && ch <= '9') return 'd';
+    if (ch === '.') return 'p';
+    return 'o';
+  }
+
+  var KIND_CLASS = { d: 'dig', p: 'pt', o: 'ch' };
+
+  // Zero-width padding, so a value's character COUNT never changes and the
+  // spans never have to be rebuilt. U+200B renders at zero width, so this is
+  // invisible - it exists purely to keep the DOM structure stable.
+  function padTo(text, len) {
+    while (text.length < len) text = '​' + text;
+    return text;
+  }
+
+  // Every character gets its own span and its own text node. Updating a value
+  // then only writes nodeValue (and, rarely, a className) - no nodes are added
+  // or removed, so no line box is ever torn down and rebuilt.
+  //
+  // This matters: the earlier version rebuilt the children whenever the string
+  // changed length, and measurement showed #cpu-load-text doing exactly that
+  // ~10 times in 14s as CPU load crossed between "3%" and "12%". That rebuild
+  // is what made the row twitch down and settle on each update.
+  function setNum(el, text) {
+    if (!el || el._num === text) return;
+    var prev = el._num;
+    var i, ch, kind;
+
+    if (prev !== undefined && el._parts && prev.length === text.length) {
+      for (i = 0; i < text.length; i++) {
+        ch = text.charAt(i);
+        if (prev.charAt(i) === ch) continue;
+        el._parts[i].nodeValue = ch;
+        var span = el._parts[i].parentNode;
+        if (span && span.nodeType === 1) {
+          var want = KIND_CLASS[charKind(ch)];
+          if (span.className !== want) span.className = want;
+        }
+      }
+      el._num = text;
+      return;
+    }
+
+    el.textContent = '';
+    var parts = [];
+    for (i = 0; i < text.length; i++) {
+      ch = text.charAt(i);
+      kind = charKind(ch);
+      var node = document.createTextNode(ch);
+      var wrap = document.createElement('span');
+      wrap.className = KIND_CLASS[kind];
+      wrap.appendChild(node);
+      el.appendChild(wrap);
+      parts.push(node);
+    }
+    el._parts = parts;
+    el._num = text;
+  }
+
+  function setValue(el, value, limits, digits, width) {
+    if (!el) return;
+    setNum(el, padTo(fmt(value, digits), width || 0));
+    if (limits) {
+      var h = heat(value, limits);
+      if (h) el.dataset.heat = h; else delete el.dataset.heat;
+    }
+  }
+
+  // ---- per-core load square ----------------------------------------------
+
+  // One fixed track per logical processor (16 on this CPU), 2 columns x 8 rows.
+  // The tracks are built once and only the fill widths change afterwards, for
+  // the same reason setNum writes nodeValue instead of rebuilding: adding or
+  // removing nodes reflows the card. Never touches `hidden` - the layout owns
+  // that; .cores:empty hides it when there is no per-core data at all.
+  var CORE_HEAT = [60, 85];
+
+  function setCores(cores) {
+    var el = $('cpu-cores');
+    if (!el || !cores || !cores.length) return;
+
+    if (el._n !== cores.length) {
+      el.textContent = '';
+      el._bars = [];
+      for (var i = 0; i < cores.length; i++) {
+        var track = document.createElement('span');
+        track.className = 'core';
+        var fill = document.createElement('i');
+        track.appendChild(fill);
+        el.appendChild(track);
+        el._bars.push(fill);
+      }
+      el._n = cores.length;
+    }
+
+    for (var j = 0; j < cores.length; j++) {
+      var bar = el._bars[j];
+      var v = cores[j];
+      bar.style.width = Math.max(0, Math.min(100, v)) + '%';
+      var h = heat(v, CORE_HEAT);
+      if (h) bar.dataset.heat = h; else delete bar.dataset.heat;
+    }
+  }
+
+  // ---- clock --------------------------------------------------------------
+
+  function tickClock() {
+    var now = new Date();
+    setNum($('time'), now.toLocaleTimeString([], {
+      hour: '2-digit', minute: '2-digit', hour12: false
+    }));
+    setText($('date'), now.toLocaleDateString([], {
+      weekday: 'short', day: 'numeric', month: 'short'
+    }));
+  }
+
+  // ---- connection state ---------------------------------------------------
+
+  function setStatus(state, text) {
+    var el = $('status');
+    if (el) el.dataset.state = state;
+    setText($('status-text'), text);
+  }
+
+  function refreshStatus() {
+    if (!everConnected) return;
+    var age = Date.now() - lastGood;
+    if (age > DOWN_MS) {
+      setStatus('down', 'no signal');
+      // Deliberately NOT reloading here. Reloading while the server is
+      // unreachable lands on a connection-error page with nothing to poll and
+      // no way back - and this iPad is mounted inside the PC case, so nobody
+      // can rescue it. Recovery is handled on the first successful poll
+      // instead (see paint), which is safe because the server is by then
+      // demonstrably answering.
+      if (age > 120000) wasDownLong = true;
+    } else if (age > STALE_MS) {
+      setStatus('stale', 'reconnecting');
+    }
+  }
+
+  // ---- painting -----------------------------------------------------------
+
+  function paint(data) {
+    if (!data || !data.ok) {
+      setStatus('down', (data && data.error) ? data.error : 'sensor error');
+      return;
+    }
+
+    lastGood = Date.now();
+    everConnected = true;
+    setStatus('live', 'live');
+
+    // Self-update, and recovery after a long outage. Both reload, and both do
+    // it here - on a successful poll - because that proves the server is up
+    // and the reload will actually land on a page.
+    //
+    // The iPad is mounted inside the PC case and cannot be touched, so a
+    // deliberate server outage of a few minutes is the only remote lever for
+    // forcing stale code to refresh.
+    if (data.build && myBuild && data.build !== myBuild) {
+      setText($('hint'), 'updating…');
+      setTimeout(function () { location.reload(); }, 400);
+      return;
+    }
+    if (wasDownLong) {
+      wasDownLong = false;
+      setText($('hint'), 'reconnected, reloading…');
+      setTimeout(function () { location.reload(); }, 600);
+      return;
+    }
+
+    // The PC owns the zoom as well; adopt it when it changes - but not while
+    // one of our own writes is still settling, or an in-flight poll would
+    // undo the click that caused it.
+    if (typeof data.zoom === 'number' && data.zoom !== zoomWanted &&
+        Date.now() - zoomWroteAt > ZOOM_SETTLE_MS) {
+      zoomWanted = data.zoom;
+      applyZoom(zoomWanted, false);
+    }
+
+    // The PC owns the wallpaper; adopt its choice whenever it differs.
+    if (data.wallpaper && !sameChoice(data.wallpaper, Wallpaper.current())) {
+      Wallpaper.apply(data.wallpaper);
+      markActive(data.wallpaper);
+    }
+
+    // ...and the layout. Only re-applied when it actually changed, so the 1 Hz
+    // poll does not rebuild the grid every second.
+    if (Array.isArray(data.layout)) {
+      var lk = layoutKey(data.layout);
+      if (lk !== lastLayoutKey) applyLayout(data.layout);
+    }
+
+    var cpu = data.cpu || {};
+    setText($('cpu-name'), cpu.name || ' ');
+    setValue($('cpu-temp'), cpu.temp_c, CPU_HEAT, 0, 3);
+    setNum($('cpu-load-text'), padTo(fmt(cpu.load, 0) + '%', 4));
+    setBar($('cpu-load-bar'), cpu.load);
+    setNum($('cpu-threads'), fmt(cpu.threads, 0));
+    setCores(cpu.cores);
+
+    sensorHint = (cpu.temp_c === null || cpu.temp_c === undefined)
+      ? 'CPU temperature needs LibreHardwareMonitor running as administrator.'
+      : '';
+    showHint();
+
+    var gpu = data.gpu;
+    if (gpu) {
+      setText($('gpu-name'), gpu.name || ' ');
+      setValue($('gpu-temp'), gpu.temp_c, GPU_HEAT, 0, 3);
+      setNum($('gpu-load-text'), padTo(fmt(gpu.load, 0) + '%', 4));
+      setBar($('gpu-load-bar'), gpu.load);
+
+      var vramPct = null;
+      if (gpu.vram_used_gb !== null && gpu.vram_total_gb) {
+        vramPct = 100 * gpu.vram_used_gb / gpu.vram_total_gb;
+      }
+      setNum($('vram-text'), padTo(fmt(gpu.vram_used_gb, 1), 4) + ' / ' + fmt(gpu.vram_total_gb, 1) + ' GB');
+      setBar($('vram-bar'), vramPct);
+      setNum($('gpu-power'), padTo(fmt(gpu.power_w, 0), 3));
+      setNum($('gpu-fan'), padTo(fmt(gpu.fan, 0), 3));
+      setNum($('gpu-junction'), padTo(fmt(gpu.junction_c, 0), 3));
+    } else {
+      setText($('gpu-name'), 'nvidia-smi unavailable');
+    }
+
+    var ram = data.ram;
+    if (ram) {
+      setValue($('ram-used'), ram.used_gb, null, 1, 4);
+      setNum($('ram-sub'), fmt(ram.total_gb, 0) + ' GB total');
+      setNum($('ram-pct-text'), padTo(fmt(ram.percent, 0) + '%', 4));
+      setBar($('ram-bar'), ram.percent, [75, 90]);
+      setNum($('ram-free'), padTo(fmt(ram.total_gb - ram.used_gb, 1), 4));
+    }
+
+    renderDisks(data.disks);
+  }
+
+  // ---- drives -------------------------------------------------------------
+
+  // One chip per drive. The row is only rebuilt when the SET of drives
+  // changes (a share appearing or dropping); otherwise the numbers are
+  // updated in place like every other value, so no nodes churn.
+  var diskParts = {};
+
+  function renderDisks(disks) {
+    var row = $('disk-chips');
+    if (!row || !disks) return;
+
+    var key = disks.map(function (d) { return d.drive; }).join(',');
+    if (row._key !== key) {
+      row.innerHTML = '';
+      diskParts = {};
+      disks.forEach(function (d) {
+        var chip = document.createElement('span');
+        chip.className = 'chip' + (d.network ? ' chip-net' : '');
+        var name = document.createElement('b');
+        name.textContent = d.drive;
+        var used = document.createElement('b');
+        var total = document.createElement('span');
+        chip.appendChild(name);
+        chip.appendChild(document.createTextNode(' '));
+        chip.appendChild(used);
+        chip.appendChild(total);
+        row.appendChild(chip);
+        diskParts[d.drive] = { used: used, total: total };
+      });
+      row._key = key;
+    }
+
+    disks.forEach(function (d) {
+      var p = diskParts[d.drive];
+      if (!p) return;
+      setNum(p.used, padTo(fmt(d.used_gb, 0), 4));
+      setNum(p.total, '/' + fmt(d.total_gb, 0));
+    });
+  }
+
+  // ---- polling ------------------------------------------------------------
+
+  function poll() {
+    fetch('/api/stats', { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(paint)
+      .catch(function () { /* refreshStatus reports it from the timestamp */ });
+  }
+
+  // ---- screen wake lock ---------------------------------------------------
+
+  // Safari 16.4+ supports this, so iPadOS 17 is fine. Without it the iPad
+  // dims on its Auto-Lock timer and the dashboard goes dark.
+  var wakeLock = null;
+
+  function requestWakeLock() {
+    if (!('wakeLock' in navigator)) return;
+    navigator.wakeLock.request('screen').then(function (lock) {
+      wakeLock = lock;
+      lock.addEventListener('release', function () { wakeLock = null; });
+    }).catch(function () {
+      // Denied (usually because the page is not visible) - retried on focus.
+    });
+  }
+
+  // ---- waking from sleep --------------------------------------------------
+
+  // After the iPad sleeps the page comes back in a variety of states: the wake
+  // lock is gone, the poll timer may have been throttled or stopped, the WebGL
+  // context may have been discarded and the video may be stalled. Rather than
+  // try to repair each one, anything gone quiet for long enough gets a clean
+  // reload - it is a dashboard, there is no state worth preserving.
+  var RELOAD_AFTER_MS = 90000;
+
+  function wakeUp() {
+    if (!wakeLock) requestWakeLock();
+
+    // Same reasoning as refreshStatus: do not reload blind. Flag it and let
+    // the next successful poll do the reload.
+    if (everConnected && Date.now() - lastGood > RELOAD_AFTER_MS) {
+      wasDownLong = true;
+    }
+
+    if (window.Wallpaper && Wallpaper.resume) Wallpaper.resume();
+    poll();
+    // The network usually needs a moment to come back with the WiFi radio.
+    setTimeout(poll, 1200);
+    setTimeout(poll, 4000);
+  }
+
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) wakeUp();
+  });
+
+  // Safari can restore from its back/forward cache without firing
+  // visibilitychange, so waking the iPad sometimes only lands here.
+  window.addEventListener('pageshow', function (e) {
+    if (e.persisted) wakeUp();
+  });
+  window.addEventListener('focus', wakeUp);
+  window.addEventListener('online', wakeUp);
+
+  // ---- wallpaper picker ---------------------------------------------------
+
+  // The choice lives on the PC, not in this browser: the server owns it, and
+  // every viewer follows whatever the PC last set. That is what lets the
+  // wallpaper be changed from the tray menu without touching the iPad.
+
+  function sameChoice(a, b) {
+    if (!a || !b) return false;
+    if (a.mode !== b.mode) return false;
+    if (a.mode === 'shader') return true;
+    return String(a.id) === String(b.id);
+  }
+
+  function markActive(choice) {
+    var grid = $('pick-grid');
+    if (!grid) return;
+    Array.prototype.forEach.call(grid.children, function (tile) {
+      var c = tile._choice;
+      tile.classList.toggle('is-active', sameChoice(c, choice));
+    });
+  }
+
+  function selectWallpaper(choice) {
+    // Applied here straight away so the tap feels instant, then told to the
+    // server, which is what other viewers pick up on their next poll.
+    Wallpaper.apply(choice);
+    markActive(choice);
+    var q = '?mode=' + encodeURIComponent(choice.mode) +
+            '&id=' + encodeURIComponent(choice.id || '') +
+            '&title=' + encodeURIComponent(choice.title || '');
+    fetch('/api/wallpaper/select' + q, { cache: 'no-store' }).catch(function () {});
+  }
+
+  function tile(choice, label, badge, imgSrc, active) {
+    var el = document.createElement('button');
+    el.type = 'button';
+    el.className = 'tile' + (active ? ' is-active' : '') +
+                   (imgSrc ? '' : ' tile-shader');
+    if (imgSrc) {
+      var img = document.createElement('img');
+      img.loading = 'lazy';
+      img.alt = '';
+      img.src = imgSrc;
+      el.appendChild(img);
+    } else {
+      el.appendChild(document.createTextNode(label));
+    }
+    if (badge) {
+      var b = document.createElement('span');
+      b.className = 'tile-badge';
+      b.textContent = badge;
+      el.appendChild(b);
+    }
+    if (imgSrc) {
+      var n = document.createElement('span');
+      n.className = 'tile-name';
+      n.textContent = label;
+      el.appendChild(n);
+    }
+    el._choice = choice;
+    el.addEventListener('click', function () { selectWallpaper(choice); });
+    return el;
+  }
+
+  function buildPicker() {
+    fetch('/api/wallpapers', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var grid = $('pick-grid');
+        grid.innerHTML = '';
+        var active = Wallpaper.current();
+
+        grid.appendChild(tile(
+          { mode: 'shader' }, 'Built-in nebula', 'shader', null,
+          active.mode === 'shader'
+        ));
+
+        var items = (data.items || []).filter(function (i) { return i.supported; });
+        items.forEach(function (i) {
+          var choice = { mode: i.type, id: i.id, title: i.title };
+          grid.appendChild(tile(
+            choice, i.title, i.type,
+            i.preview ? '/media/' + i.id + '/preview' : null,
+            active.mode === i.type && active.id === i.id
+          ));
+        });
+
+        var total = (data.items || []).length;
+        var build = $('build') ? $('build').textContent : '?';
+        setText($('pick-count'),
+                items.length + ' of ' + total + ' usable  ·  build ' + build);
+
+        var skipped = total - items.length;
+        var note = '';
+        if (skipped > 0) {
+          note = skipped + ' scene or application wallpapers cannot be used - ' +
+                 'only Wallpaper Engine itself can render those.';
+        }
+        if (!data.ffmpeg) {
+          note += ' ffmpeg was not found, so video wallpapers cannot be prepared.';
+        }
+        setText($('pick-note'), note);
+      })
+      .catch(function () {
+        setText($('pick-note'), 'Could not read the wallpaper library.');
+      });
+  }
+
+  $('pick-open').addEventListener('click', function () {
+    $('picker').hidden = false;
+    buildPicker();
+  });
+
+  $('pick-close').addEventListener('click', function () {
+    $('picker').hidden = true;
+  });
+
+  $('picker').addEventListener('click', function (e) {
+    if (e.target === $('picker')) $('picker').hidden = true;   // tap outside
+  });
+
+  // ---- zoom ---------------------------------------------------------------
+
+  // Drives the --s multiplier in style.css rather than browser zoom or a
+  // transform: every size is recomputed, so the layout reflows and the text
+  // is re-rasterised crisp instead of being scaled as pixels.
+  // Zoom is owned by the server too, so it can be set from the PC's tray menu.
+  // Two numbers matter: what was ASKED for, and what actually fitted. Only the
+  // asked-for value is sent back, or the fit clamp would ratchet it down.
+  var ZOOM_MIN = 0.6, ZOOM_MAX = 2.4, ZOOM_STEP = 0.1;
+  var zoom = 1;          // applied, after the fit clamp
+  var zoomWanted = 1;    // requested, what the server holds
+  // A local change and the 1 Hz poll race: the poll can return the previous
+  // server value after a click has already moved on, which drags the page
+  // backwards and makes the next click compute from a stale base. Ignore the
+  // server's value briefly after we write one.
+  var zoomWroteAt = 0;
+  var ZOOM_SETTLE_MS = 2500;
+
+  function overflows() {
+    var d = $('dash');
+    // Reading scrollHeight forces a reflow, so this sees the new layout.
+    return d.scrollHeight > d.clientHeight + 1;
+  }
+
+  function applyZoom(value, persist) {
+    zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Math.round(value * 100) / 100));
+    document.documentElement.style.setProperty('--s', String(zoom));
+
+    // The dashboard never scrolls, so a zoom that does not fit would silently
+    // clip the bottom card. Step back down until it does fit - the ceiling
+    // depends on the display, so it cannot be a fixed number.
+    var guard = 0;
+    while (zoom > ZOOM_MIN && overflows() && guard++ < 40) {
+      zoom = Math.round((zoom - ZOOM_STEP) * 100) / 100;
+      document.documentElement.style.setProperty('--s', String(zoom));
+    }
+
+    setText($('zoom-reset'), Math.round(zoom * 100) + '%');
+    if (persist) {
+      zoomWroteAt = Date.now();
+      fetch('/api/zoom/select?value=' + encodeURIComponent(zoomWanted),
+            { cache: 'no-store' }).catch(function () {});
+    }
+  }
+
+  function requestZoom(value) {
+    zoomWanted = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Math.round(value * 100) / 100));
+    applyZoom(zoomWanted, true);
+  }
+
+  // A rotation or a resolution change moves the ceiling, so re-fit. The grid
+  // also switches between columns (landscape) and weighted rows (portrait).
+  window.addEventListener('resize', function () { applyZoom(zoom, false); fitGrid(); });
+
+  applyZoom(1, false);   // corrected by the first poll from the server
+
+  $('zoom-in').addEventListener('click', function () { requestZoom(zoomWanted + ZOOM_STEP); });
+  $('zoom-out').addEventListener('click', function () { requestZoom(zoomWanted - ZOOM_STEP); });
+  $('zoom-reset').addEventListener('click', function () { requestZoom(1); });
+
+  // ---- fullscreen ---------------------------------------------------------
+
+  var root = document.documentElement;
+  var canFullscreen = !!(root.requestFullscreen || root.webkitRequestFullscreen);
+
+  function isFullscreen() {
+    return !!(document.fullscreenElement || document.webkitFullscreenElement);
+  }
+
+  function toggleFullscreen() {
+    if (!canFullscreen) return;
+    try {
+      if (isFullscreen()) {
+        (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+      } else {
+        (root.requestFullscreen || root.webkitRequestFullscreen).call(root);
+      }
+    } catch (e) { /* refused without a user gesture; the button retries */ }
+  }
+
+  // iPhone Safari has no element fullscreen, and an Add-to-Home-Screen launch
+  // is already full screen - so only offer the button where it does something.
+  if (canFullscreen && !window.navigator.standalone) {
+    $('fs-toggle').hidden = false;
+    $('fs-toggle').addEventListener('click', toggleFullscreen);
+  }
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'f' || e.key === 'F') toggleFullscreen();
+    if (e.key === 'w' || e.key === 'W') $('pick-open').click();
+    if (e.key === '+' || e.key === '=') requestZoom(zoomWanted + ZOOM_STEP);
+    if (e.key === '-' || e.key === '_') requestZoom(zoomWanted - ZOOM_STEP);
+    if (e.key === '0') requestZoom(1);
+  });
+
+  // ---- idle chrome --------------------------------------------------------
+
+  var idleTimer = null;
+
+  function wake() {
+    document.body.classList.remove('is-idle');
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(function () {
+      if ($('picker').hidden && $('layout').hidden) {
+        document.body.classList.add('is-idle');
+      }
+    }, 5000);
+  }
+
+  ['mousemove', 'touchstart', 'keydown', 'click'].forEach(function (evt) {
+    document.addEventListener(evt, wake, { passive: true });
+  });
+  wake();
+
+  // ---- debug overlay ------------------------------------------------------
+
+  // Open with ?debug=1 (or press D) to measure layout movement ON THE DEVICE.
+  // Three rounds of fixes measured clean in headless Chromium while the user
+  // still saw shifting on the iPad, so the measurement has to run where the
+  // problem is. Reports any element whose box moves, and by how much.
+  function startDebug() {
+    var watch = [
+      ['time', '#time'], ['date', '.date'],
+      ['bar', '.bar'], ['cards', '.cards'],
+      ['cpuRead', '#card-cpu .readout'], ['cpuTemp', '#cpu-temp'],
+      ['cpuUnit', '#card-cpu .unit'], ['cpuLoad', '#cpu-load-text'],
+      ['gpuRead', '#card-gpu .readout'], ['gpuTemp', '#gpu-temp'],
+      ['gpuUnit', '#card-gpu .unit'], ['ramUsed', '#ram-used'],
+      ['chips', '#card-gpu .chips'], ['hint', '#hint']
+    ];
+
+    var box = document.createElement('div');
+    box.id = 'debug-box';
+    document.body.appendChild(box);
+
+    var base = {}, worst = {}, samples = 0;
+    var settleUntil = Date.now() + 3000;   // ignore initial layout settling
+    var lastS = '', lastW = 0, lastH = 0;
+
+    function reset() {
+      base = {}; worst = {}; samples = 0;
+      settleUntil = Date.now() + 1200;
+    }
+
+    // Tap the readout to re-baseline after deliberately changing something.
+    box.style.pointerEvents = 'auto';
+    box.addEventListener('click', reset);
+
+    function rect(sel) {
+      var el = document.querySelector(sel);
+      if (!el) return null;
+      var r = el.getBoundingClientRect();
+      return [r.left, r.top, r.width, r.height];
+    }
+
+    function sample() {
+      // Zoom changes and rotations legitimately move everything, so they must
+      // re-baseline rather than be reported as drift.
+      var sNow = getComputedStyle(document.documentElement)
+                   .getPropertyValue('--s').trim();
+      if (sNow !== lastS || window.innerWidth !== lastW ||
+          window.innerHeight !== lastH) {
+        lastS = sNow; lastW = window.innerWidth; lastH = window.innerHeight;
+        reset();
+      }
+      if (Date.now() < settleUntil) { base = {}; return; }
+      samples++;
+      var lines = [];
+      lines.push('build ' + (($('build') || {}).textContent || '?') +
+                 '  dpr ' + (window.devicePixelRatio || 1) +
+                 '  ' + window.innerWidth + 'x' + window.innerHeight);
+      lines.push('--s ' + getComputedStyle(document.documentElement)
+                   .getPropertyValue('--s').trim() +
+                 '  fs ' + Math.round(parseFloat(
+                   getComputedStyle(document.querySelector('.value')).fontSize)) + 'px' +
+                 '  n=' + samples);
+
+      var any = false;
+      for (var i = 0; i < watch.length; i++) {
+        var name = watch[i][0], r = rect(watch[i][1]);
+        if (!r) continue;
+        if (!base[name]) { base[name] = r; worst[name] = [0, 0, 0, 0]; continue; }
+        for (var k = 0; k < 4; k++) {
+          var d = Math.abs(r[k] - base[name][k]);
+          if (d > worst[name][k]) worst[name][k] = d;
+        }
+        var w = worst[name];
+        var m = Math.max(w[0], w[1], w[2], w[3]);
+        if (m > 0.5) {
+          any = true;
+          lines.push(name + '  L' + w[0].toFixed(1) + ' T' + w[1].toFixed(1) +
+                     ' W' + w[2].toFixed(1) + ' H' + w[3].toFixed(1));
+        }
+      }
+      if (!any) lines.push('NOTHING HAS MOVED  (tap to reset)');
+      else lines.push('(tap to reset)');
+      box.textContent = lines.join(String.fromCharCode(10));
+    }
+
+    sample();
+    setInterval(sample, 250);
+  }
+
+  if (/[?&]debug=1/.test(location.search)) startDebug();
+  document.addEventListener('keydown', function (e) {
+    if ((e.key === 'd' || e.key === 'D') && !$('debug-box')) startDebug();
+  });
+
+  // ---- layout-shift watchdog ----------------------------------------------
+
+  // Samples a few key rows every animation frame and posts anything that moves
+  // back to the server. The display cannot be reached or filmed, and the shift
+  // does not reproduce in headless Chromium, so the page has to be the one
+  // that measures it. Cheap: four rects per frame, and it only reports when
+  // something actually moved, at most once a minute.
+  (function watchShifts() {
+    // Track HEIGHTS too: the tops told us everything shifts by a multiple of
+    // ~24.9px, which means something is changing height and the effect
+    // accumulates down the page. This finds which element it is.
+    var TARGETS = [
+      ['dash',    '#dash'],
+      ['cards',   '.cards'],
+      ['hint',    '#hint'],
+      ['bar',     '.bar'],
+      ['cpuCard', '#card-cpu'],
+      ['gpuCard', '#card-gpu'],
+      ['ramCard', '#card-ram'],
+      ['cpuHead', '#card-cpu .card-head'],
+      ['cpuRead', '#card-cpu .readout'],
+      ['cpuSide', '#card-cpu .side'],
+      ['cpuSub',  '#cpu-name'],
+      ['gpuHead', '#card-gpu .card-head'],
+      ['gpuRead', '#card-gpu .readout'],
+      ['gpuSide', '#card-gpu .side'],
+      ['gpuMet',  '#card-gpu .meters'],
+      ['gpuChip', '#card-gpu .chips'],
+      ['ramHead', '#card-ram .card-head'],
+      ['ramRead', '#card-ram .readout'],
+      ['ramSide', '#card-ram .side'],
+      ['ramChip', '#card-ram .chips']
+    ];
+    var base = {}, worst = {}, frames = 0, reportedAt = 0;
+    var loadedAt = Date.now();
+    var snapshot = null;
+    var SETTLE_MS = 8000;
+
+    function flush() {
+      var bad = [];
+      for (var k in worst) {
+        var w = worst[k];
+        if (w.hd > 0.5) {
+          bad.push(k + ' HEIGHT ' + w.hlo.toFixed(2) + '..' + w.hhi.toFixed(2) +
+                   ' (d' + w.hd.toFixed(2) + ')');
+        } else if (w.d > 0.5) {
+          bad.push(k + ' top d' + w.d.toFixed(2));
+        }
+      }
+      if (bad.length && Date.now() - reportedAt > 20000) {
+        reportedAt = Date.now();
+        try {
+          fetch('/api/diag', {
+            method: 'POST',
+            body: JSON.stringify({
+              ua: navigator.userAgent,
+              dpr: window.devicePixelRatio,
+              vw: window.innerWidth, vh: window.innerHeight,
+              s: getComputedStyle(document.documentElement).getPropertyValue('--s').trim(),
+              build: myBuild, frames: frames,
+              aliveSec: Math.round((Date.now() - loadedAt) / 1000),
+              moved: bad, snap: snapshot
+            })
+          }).catch(function () {});
+        } catch (e) {}
+      }
+      base = {}; worst = {}; frames = 0; snapshot = null;
+    }
+
+    var windowStart = Date.now();
+    var lastW = window.innerWidth, lastH = window.innerHeight;
+    function tick() {
+      requestAnimationFrame(tick);
+      if (Date.now() - loadedAt < SETTLE_MS) { base = {}; worst = {}; return; }
+      // A resize or a rotation legitimately moves everything - including a
+      // headless test harness changing the viewport. Re-baseline rather than
+      // report it, exactly as the debug overlay does. Without this, rotating
+      // the iPad would post a full-screen "movement" report and look like the
+      // jitter bug returned.
+      if (window.innerWidth !== lastW || window.innerHeight !== lastH) {
+        lastW = window.innerWidth;
+        lastH = window.innerHeight;
+        base = {}; worst = {}; frames = 0; snapshot = null;
+        return;
+      }
+      frames++;
+      for (var i = 0; i < TARGETS.length; i++) {
+        var el = document.querySelector(TARGETS[i][1]);
+        if (!el) continue;
+        var r = el.getBoundingClientRect();
+        var k = TARGETS[i][0];
+        if (!base[k]) {
+          base[k] = { t: r.top, h: r.height };
+          worst[k] = { d: 0, hd: 0, hlo: r.height, hhi: r.height };
+          continue;
+        }
+        var d = Math.abs(r.top - base[k].t);
+        if (d > worst[k].d) worst[k].d = d;
+        var hd = Math.abs(r.height - base[k].h);
+        if (hd > worst[k].hd) worst[k].hd = hd;
+        if (r.height < worst[k].hlo) worst[k].hlo = r.height;
+        if (r.height > worst[k].hhi) worst[k].hhi = r.height;
+
+        // When the CPU card reaches a new maximum height, photograph the whole
+        // layout in that same frame. Independent min/max per element loses the
+        // correlation, and the correlation is the whole question: which
+        // element is actually tall at the moment the card is tall?
+        if (k === 'cpuCard' && r.height > base[k].h + 1 && !snapshot) {
+          snapshot = {};
+          for (var j = 0; j < TARGETS.length; j++) {
+            var e2 = document.querySelector(TARGETS[j][1]);
+            if (!e2) continue;
+            var r2 = e2.getBoundingClientRect();
+            snapshot[TARGETS[j][0]] = +r2.height.toFixed(1);
+          }
+          snapshot.__text = {
+            cpuSub: (document.getElementById('cpu-name') || {}).textContent,
+            hint: (document.getElementById('hint') || {}).textContent
+          };
+          snapshot.__baseline = {};
+          for (var b in base) snapshot.__baseline[b] = +base[b].h.toFixed(1);
+        }
+      }
+      if (Date.now() - windowStart > 15000) { windowStart = Date.now(); flush(); }
+    }
+    requestAnimationFrame(tick);
+  })();
+
+  // ---- layout -------------------------------------------------------------
+
+  // Which cards and rows are shown, and in what order. Owned by the PC like
+  // the wallpaper and zoom: the page adopts whatever /api/stats carries and
+  // writes edits back to /api/layout/select.
+  //
+  // The grid is the one place this can regress the "numbers jump" fix, so the
+  // template is always regenerated from the VISIBLE cards as explicit fr
+  // fractions - never auto rows. A hidden card is display:none and therefore
+  // not a grid item at all; that is why the column count and the portrait row
+  // fractions are rebuilt here rather than left to CSS.
+  var CARD_IDS = ['cpu', 'gpu', 'ram'];
+  var CARD_LABEL = { cpu: 'CPU', gpu: 'GPU', ram: 'Memory' };
+  // Portrait row weights: the GPU card carries more rows, so it gets more room.
+  var CARD_WEIGHT = { cpu: 0.78, gpu: 1.15, ram: 1.07 };
+  var ROW_IDS = {
+    cpu: ['temp', 'load', 'cores'],
+    gpu: ['temp', 'load', 'vram', 'chips'],
+    ram: ['temp', 'load', 'free', 'drives']
+  };
+  var ROW_LABEL = {
+    cpu: { temp: 'Temperature', load: 'Load meter', cores: 'Per-core square' },
+    gpu: { temp: 'Temperature', load: 'Load meter', vram: 'VRAM meter',
+           chips: 'Power / Fan / Junction' },
+    ram: { temp: 'Temperature', load: 'In-use meter', free: 'Free GB',
+           drives: 'Drive chips' }
+  };
+  var DEFAULT_LAYOUT = [
+    { id: 'cpu', rows: ROW_IDS.cpu.slice() },
+    { id: 'gpu', rows: ROW_IDS.gpu.slice() },
+    { id: 'ram', rows: ROW_IDS.ram.slice() }
+  ];
+
+  var layoutState = DEFAULT_LAYOUT.map(function (c) {
+    return { id: c.id, rows: c.rows.slice() };
+  });
+  var lastLayoutKey = '';
+
+  function layoutKey(layout) {
+    return layout.map(function (c) {
+      return c.id + ':' + ((c.rows || []).join('.'));
+    }).join('|');
+  }
+
+  function indexOfCard(id) {
+    for (var i = 0; i < layoutState.length; i++) {
+      if (layoutState[i].id === id) return i;
+    }
+    return -1;
+  }
+
+  function fitGrid() {
+    var cards = document.querySelector('.cards');
+    if (!cards) return;
+    var visible = layoutState.map(function (c) { return c.id; });
+    if (!visible.length) return;
+    // Same breakpoint as the CSS media query, so the two never disagree.
+    // minmax(0, Xfr) everywhere: a bare fr is minmax(auto, fr) and a wide
+    // min-content would break the equal columns / fixed rows.
+    if (window.matchMedia('(max-aspect-ratio: 1/1)').matches) {
+      cards.style.gridTemplateColumns = 'minmax(0, 1fr)';
+      cards.style.gridTemplateRows = visible.map(function (id) {
+        return 'minmax(0, ' + (CARD_WEIGHT[id] || 1) + 'fr)';
+      }).join(' ');
+      cards.style.gridAutoRows = '0';
+    } else {
+      cards.style.gridTemplateColumns =
+        'repeat(' + visible.length + ', minmax(0, 1fr))';
+      cards.style.gridTemplateRows = 'minmax(0, 1fr)';
+      cards.style.gridAutoRows = '0';
+    }
+  }
+
+  function applyLayout(layout) {
+    if (!Array.isArray(layout) || !layout.length) return;
+    layoutState = layout.map(function (c) {
+      return { id: c.id, rows: (c.rows || []).slice() };
+    });
+    lastLayoutKey = layoutKey(layoutState);
+
+    var present = {};
+    layoutState.forEach(function (c, i) {
+      present[c.id] = true;
+      var card = $('card-' + c.id);
+      if (!card) return;
+      card.hidden = false;
+      card.style.order = String(i);
+      ROW_IDS[c.id].forEach(function (row) {
+        var el = card.querySelector('[data-row="' + row + '"]');
+        if (el) el.hidden = c.rows.indexOf(row) === -1;
+      });
+    });
+    CARD_IDS.forEach(function (id) {
+      if (present[id]) return;
+      var card = $('card-' + id);
+      if (card) card.hidden = true;
+    });
+
+    fitGrid();
+  }
+
+  function saveLayout() {
+    applyLayout(layoutState);
+    buildLayoutEditor();
+    try {
+      fetch('/api/layout/select', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(layoutState)
+      }).catch(function () {});
+    } catch (e) { /* older Safari without fetch body support: keep local */ }
+  }
+
+  // ---- layout editor ------------------------------------------------------
+
+  function moveCard(id, dir) {
+    var i = indexOfCard(id), j = i + dir;
+    if (i < 0 || j < 0 || j >= layoutState.length) return;
+    var tmp = layoutState[i];
+    layoutState[i] = layoutState[j];
+    layoutState[j] = tmp;
+    saveLayout();
+  }
+
+  function hideCard(id) {
+    if (layoutState.length <= 1) return;   // never leave the dashboard empty
+    var i = indexOfCard(id);
+    if (i < 0) return;
+    layoutState.splice(i, 1);
+    saveLayout();
+  }
+
+  function showCard(id) {
+    if (indexOfCard(id) >= 0) return;
+    layoutState.push({ id: id, rows: ROW_IDS[id].slice() });
+    saveLayout();
+  }
+
+  function toggleRow(id, row) {
+    var i = indexOfCard(id);
+    if (i < 0) return;
+    var rows = layoutState[i].rows;
+    var k = rows.indexOf(row);
+    if (k >= 0) rows.splice(k, 1); else rows.push(row);
+    // Keep the canonical order so the page matches what the server stores.
+    layoutState[i].rows = ROW_IDS[id].filter(function (r) {
+      return rows.indexOf(r) !== -1;
+    });
+    saveLayout();
+  }
+
+  function lbtn(label, title, handler) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'lbtn';
+    b.textContent = label;
+    if (title) b.title = title;
+    b.addEventListener('click', handler);
+    return b;
+  }
+
+  function buildLayoutEditor() {
+    var list = $('layout-list');
+    if (!list) return;
+    list.innerHTML = '';
+    var present = {};
+
+    layoutState.forEach(function (card, idx) {
+      present[card.id] = true;
+      var group = document.createElement('div');
+      group.className = 'lgroup';
+
+      var head = document.createElement('div');
+      head.className = 'lgroup-head';
+      var up = lbtn('\u2191', 'Move up', function () { moveCard(card.id, -1); });
+      var down = lbtn('\u2193', 'Move down', function () { moveCard(card.id, 1); });
+      up.disabled = idx === 0;
+      down.disabled = idx === layoutState.length - 1;
+      var name = document.createElement('span');
+      name.className = 'lname';
+      name.textContent = CARD_LABEL[card.id] || card.id;
+      var vis = lbtn('\u2713', 'Hide this card', function () { hideCard(card.id); });
+      vis.setAttribute('aria-pressed', 'true');
+      vis.disabled = layoutState.length <= 1;
+      head.appendChild(up);
+      head.appendChild(down);
+      head.appendChild(name);
+      head.appendChild(vis);
+      group.appendChild(head);
+
+      ROW_IDS[card.id].forEach(function (row) {
+        var on = card.rows.indexOf(row) !== -1;
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'lrow';
+        btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+        var box = document.createElement('span');
+        box.className = 'box';
+        box.textContent = '\u2713';
+        var label = document.createElement('span');
+        label.textContent = (ROW_LABEL[card.id] || {})[row] || row;
+        btn.appendChild(box);
+        btn.appendChild(label);
+        btn.addEventListener('click', function () { toggleRow(card.id, row); });
+        group.appendChild(btn);
+      });
+
+      list.appendChild(group);
+    });
+
+    // Cards that are currently hidden get their own group, so they can be
+    // brought back without touching the tray.
+    var hidden = CARD_IDS.filter(function (id) { return !present[id]; });
+    if (hidden.length) {
+      var group = document.createElement('div');
+      group.className = 'lgroup';
+      var head = document.createElement('div');
+      head.className = 'lgroup-head';
+      var name = document.createElement('span');
+      name.className = 'lname';
+      name.textContent = 'Hidden cards';
+      head.appendChild(name);
+      group.appendChild(head);
+      hidden.forEach(function (id) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'lrow';
+        btn.setAttribute('aria-pressed', 'false');
+        var box = document.createElement('span');
+        box.className = 'box';
+        var label = document.createElement('span');
+        label.textContent = CARD_LABEL[id] || id;
+        btn.appendChild(box);
+        btn.appendChild(label);
+        btn.addEventListener('click', function () { showCard(id); });
+        group.appendChild(btn);
+      });
+      list.appendChild(group);
+    }
+  }
+
+  $('layout-open').addEventListener('click', function () {
+    $('layout').hidden = false;
+    buildLayoutEditor();
+  });
+
+  $('layout-close').addEventListener('click', function () {
+    $('layout').hidden = true;
+  });
+
+  $('layout').addEventListener('click', function (e) {
+    if (e.target === $('layout')) $('layout').hidden = true;   // tap outside
+  });
+
+  $('layout-reset').addEventListener('click', function () {
+    layoutState = DEFAULT_LAYOUT.map(function (c) {
+      return { id: c.id, rows: c.rows.slice() };
+    });
+    saveLayout();
+  });
+
+  applyLayout(layoutState);   // corrected by the first poll from the server
+
+  // ---- go -----------------------------------------------------------------
+
+  tickClock();
+  setInterval(tickClock, 1000);
+
+  // Wallpaper progress shares the hint line under the cards.
+  Wallpaper.onStatus(function (msg) {
+    wallpaperHint = msg || '';
+    showHint();
+  });
+  Wallpaper.apply({ mode: 'shader' });
+
+  poll();
+  setInterval(poll, POLL_MS);
+  setInterval(refreshStatus, 1000);
+
+  requestWakeLock();
+
+  // A tap anywhere re-arms the wake lock if iOS dropped it.
+  document.addEventListener('touchend', function () {
+    if (!wakeLock) requestWakeLock();
+  }, { passive: true });
+})();
