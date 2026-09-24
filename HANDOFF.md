@@ -25,6 +25,14 @@ hand-edited file (Notepad/PowerShell) usually carries a BOM that plain
 `json.load` rejects. `kiosk.ps1` resolves the port the same way. One server
 serves every client, so multiple devices do **not** need multiple ports.
 
+**GPU sources.** `poll_once()` takes the GPU from `nvidia-smi` first (NVIDIA,
+no admin), then from LHM's tree (`_lhm_gpu_from_tree`). Lookups are keyed on
+**(group, label)** because "GPU Core" appears under both Temperatures and Load.
+AMD and Intel are supported this way but are **untested** - the author has no
+such hardware. The first GPU poll writes every LHM sensor label to
+`CaseGauge.log`, so a mismatch is reportable. Do not rewrite it as "works on
+AMD/Intel"; it is "should work, unproven".
+
 **Client platforms.** The server is always the PC; there is no Android build.
 The page is deliberately platform-agnostic: `apple-touch-icon` for iOS, a
 manifest would be added for Android, the wake lock is **feature-detected**, and

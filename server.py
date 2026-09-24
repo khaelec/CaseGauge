@@ -8,7 +8,7 @@ Standard library only - no pip installs, no build step.
 Sensor sources:
   RAM       GlobalMemoryStatusEx (ctypes)          no admin
   CPU load  GetSystemTimes (ctypes)                no admin
-  GPU       nvidia-smi                             no admin
+  GPU       nvidia-smi, else LibreHardwareMonitor  NVIDIA / AMD+Intel
   CPU temp  LibreHardwareMonitor's web server      needs LHM running elevated
 
 Everything except CPU temp works without LibreHardwareMonitor; that field
@@ -437,17 +437,150 @@ _JUNCTION_LABELS = (
     "memory junction",
 )
 
+# ---- GPU from LibreHardwareMonitor: the AMD and Intel path ------------------
+#
+# Windows has no CLI for AMD or Intel GPU sensors (rocm-smi and amd-smi are
+# Linux; Intel has none) and the vendor SDKs are C DLLs, which would break the
+# standard-library rule. LHM covers all three vendors, so it is the source for
+# anything nvidia-smi cannot report.
+#
+# LHM groups sensors by kind (Temperatures, Load, Powers, Fans, Controls, Data)
+# and the label "GPU Core" appears under BOTH Temperatures and Load, so every
+# lookup below is keyed on (group, label) - never on the label alone.
+
+
+def _value_unit(text):
+    """Split LHM's '2150.0 MB' into (2150.0, 'mb')."""
+    if text is None:
+        return None, ""
+    m = re.match(r"\s*([-+]?\d+(?:[.,]\d+)?)\s*(\S*)\s*$", str(text))
+    if not m:
+        return None, ""
+    return float(m.group(1).replace(",", ".")), m.group(2).lower()
+
+
+def _lhm_num(text):
+    return _value_unit(text)[0]
+
+
+def _lhm_gb(text):
+    val, unit = _value_unit(text)
+    if val is None:
+        return None
+    if unit.startswith("kb"):
+        return round(val / 1024 / 1024, 2)
+    if unit.startswith("gb"):
+        return round(val, 2)
+    return round(val / 1024, 2)          # LHM reports GPU memory in MB
+
+
+def _first(items, labels):
+    for label in labels:
+        if label in items:
+            return items[label]
+    return None
+
+
+def _device_groups(device):
+    """{group_name: {label: raw_value}} for one LHM device node."""
+    groups = {}
+    for group in device.get("Children") or ():
+        gname = (group.get("Text") or "").strip().lower()
+        if not gname:
+            continue
+        items = {}
+        for sensor in group.get("Children") or ():
+            label = (sensor.get("Text") or "").strip().lower()
+            value = sensor.get("Value")
+            if label and value not in (None, ""):
+                items.setdefault(label, value)
+        if items:
+            groups[gname] = items
+    return groups
+
+
+def _looks_like_gpu(groups):
+    return (("gpu core" in groups.get("temperatures", {})) or
+            ("gpu memory total" in groups.get("data", {})))
+
+
+_lhm_gpu_logged = False
+
+
+def _lhm_gpu_dict(name, groups):
+    """Map LHM's sensor labels onto the shape nvidia-smi produces."""
+    global _lhm_gpu_logged
+    temps = groups.get("temperatures", {})
+    loads = groups.get("load", {})
+    powers = groups.get("powers", {})
+    controls = groups.get("controls", {})
+    fans = groups.get("fans", {})
+    data = groups.get("data", {})
+
+    fan = _first(controls, ("gpu fan 1", "gpu fan", "fan"))
+    fan_unit = "%"
+    if fan is None:
+        fan = _first(fans, ("gpu fan 1", "gpu fan", "fan"))
+        fan_unit = "RPM"
+
+    if not _lhm_gpu_logged:
+        # One-time dump so a user on a card we could not test can report the
+        # exact labels LHM produced - vendor and driver naming varies.
+        _lhm_gpu_logged = True
+        flat = []
+        for gname in sorted(groups):
+            for label in sorted(groups[gname]):
+                flat.append(gname + "/" + label + "=" + str(groups[gname][label]))
+        log("LHM GPU '" + name + "': " + "; ".join(flat))
+
+    return {
+        "name": name,
+        "temp_c": _lhm_num(_first(temps, ("gpu core",))),
+        "junction_c": _lhm_num(_first(temps, ("gpu memory junction",))),
+        "hotspot_c": _lhm_num(_first(temps, ("gpu hot spot",))),
+        "load": _lhm_num(_first(loads, ("gpu core",))),
+        "vram_used_gb": _lhm_gb(_first(data, ("gpu memory used",))),
+        "vram_total_gb": _lhm_gb(_first(data, ("gpu memory total",))),
+        "power_w": _lhm_num(_first(powers, ("gpu package", "gpu power", "gpu core"))),
+        "fan": _lhm_num(fan),
+        "fan_unit": fan_unit,
+        "source": "lhm",
+    }
+
+
+def _lhm_gpu_from_tree(tree):
+    """The discrete GPU, or None.
+
+    Prefers the card with the most VRAM, so a laptop's integrated GPU loses to
+    its discrete one.
+    """
+    best = None
+    best_vram = -1.0
+    for computer in tree.get("Children") or ():
+        for device in computer.get("Children") or ():
+            groups = _device_groups(device)
+            if not _looks_like_gpu(groups):
+                continue
+            total = _lhm_gb(_first(groups.get("data", {}), ("gpu memory total",)))
+            weight = total if total is not None else 0.0
+            if weight > best_vram:
+                best_vram = weight
+                best = (device.get("Text") or "GPU", groups)
+    if best is None:
+        return None
+    return _lhm_gpu_dict(best[0], best[1])
+
 
 def read_lhm():
     """Everything worth having from LibreHardwareMonitor, in one fetch.
 
-    Returns {"cpu_temp": C or None, "gpu_junction": C or None}. When LHM is
-    absent this must fail fast, or one dead sensor drags the whole poll loop
-    below its 1 Hz budget.
+    Returns {"cpu_temp": C or None, "gpu_junction": C or None,
+    "gpu": dict or None}. When LHM is absent this must fail fast, or one dead
+    sensor drags the whole poll loop below its 1 Hz budget.
     """
     global _lhm_quiet_until
 
-    empty = {"cpu_temp": None, "gpu_junction": None}
+    empty = {"cpu_temp": None, "gpu_junction": None, "gpu": None}
 
     now = time.monotonic()
     if now < _lhm_quiet_until:
@@ -487,6 +620,7 @@ def read_lhm():
     return {
         "cpu_temp": first_of(_TEMP_LABELS),
         "gpu_junction": first_of(_JUNCTION_LABELS),
+        "gpu": _lhm_gpu_from_tree(tree),
     }
 
 
@@ -698,8 +832,14 @@ CPU_NAME = detect_cpu_name()
 def poll_once():
     lhm = read_lhm()
     cpu_temp = lhm.get("cpu_temp")
+    # nvidia-smi first: it needs no admin and no LHM, so NVIDIA users are
+    # unaffected. If it is absent (AMD, Intel, or NVIDIA without the driver
+    # CLI), fall back to the GPU LHM reported.
     gpu = read_gpu()
-    if gpu is not None:
+    if gpu is None:
+        gpu = lhm.get("gpu")
+    if gpu is not None and gpu.get("junction_c") is None:
+        # nvidia-smi does not expose the memory junction; LHM does.
         gpu["junction_c"] = lhm.get("gpu_junction")
     return {
         "ok": True,
@@ -1106,7 +1246,8 @@ def main():
     print()
     print("  CPU   " + CPU_NAME)
     print("  temp  " + temp_status)
-    print("  GPU   " + (gpu["name"] if gpu else "nvidia-smi unavailable"))
+    print("  GPU   " + (gpu["name"] if gpu
+                        else "no GPU found (needs nvidia-smi or LibreHardwareMonitor)"))
     print()
     print("  Open on the iPad:  http://" + local_ip() + ":" + str(PORT) + "/")
     print("  Ctrl+C to stop.")

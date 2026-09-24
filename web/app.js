@@ -285,7 +285,18 @@
       setBar($('vram-bar'), vramPct);
       setNum($('gpu-power'), padTo(fmt(gpu.power_w, 0), 3));
       setNum($('gpu-fan'), padTo(fmt(gpu.fan, 0), 3));
-      setNum($('gpu-junction'), padTo(fmt(gpu.junction_c, 0), 3));
+      setText($('gpu-fan-unit'), gpu.fan_unit === 'RPM' ? 'RPM' : '% fan');
+
+      // AMD reports a GPU hot spot where NVIDIA reports a memory junction;
+      // show whichever exists and label it accordingly.
+      var junction = (gpu.junction_c === null || gpu.junction_c === undefined)
+        ? null : gpu.junction_c;
+      var hotspot = (gpu.hotspot_c === null || gpu.hotspot_c === undefined)
+        ? null : gpu.hotspot_c;
+      setNum($('gpu-junction'),
+             padTo(fmt(junction !== null ? junction : hotspot, 0), 3));
+      setText($('gpu-junction-unit'),
+              (junction === null && hotspot !== null) ? 'hot spot' : 'junction');
     } else {
       setText($('gpu-name'), 'nvidia-smi unavailable');
     }

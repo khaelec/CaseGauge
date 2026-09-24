@@ -34,8 +34,8 @@ less when something is missing.
 | install this | needed for | if you skip it |
 |---|---|---|
 | **Windows 10/11** | everything | — |
-| NVIDIA driver (`nvidia-smi`) | the GPU card | the GPU card reads `--` |
-| **LibreHardwareMonitor** | CPU temperature | CPU temp reads `--` |
+| NVIDIA driver (`nvidia-smi`) | the GPU card on NVIDIA | the GPU card reads `--` unless LHM is present |
+| **LibreHardwareMonitor** | CPU temperature, and AMD/Intel GPU readings | CPU temp and any AMD/Intel GPU read `--` |
 | ffmpeg *(optional)* | video wallpapers | video wallpapers can't be prepared |
 | Wallpaper Engine *(optional, paid)* | its wallpapers | only the built-in nebula |
 
@@ -607,7 +607,11 @@ coffee — it is a voluntary tip, not a purchase, and it unlocks nothing:
 ## Known limits
 
 - No authentication or TLS. LAN only, `Private` firewall profile only.
-- GPU card requires NVIDIA. An AMD or Intel GPU reports nothing, since
-  `nvidia-smi` is the only source wired up.
+- **AMD and Intel GPUs are supported but untested.** NVIDIA uses `nvidia-smi`;
+  anything else falls back to LibreHardwareMonitor (its Temperatures, Load,
+  Powers, Fans and Data groups), which covers all three vendors but has only
+  been validated on NVIDIA. If an AMD or Intel card reads `--`, check
+  `CaseGauge.log` — the first GPU poll dumps every LibreHardwareMonitor sensor
+  label it saw, so a mismatch can be reported and fixed.
 - Stats poll at 1 Hz over plain HTTP. Fine for a dashboard; if you ever want
   sub-second updates, move `/api/stats` to Server-Sent Events.
