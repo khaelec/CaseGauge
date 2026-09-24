@@ -1,0 +1,3 @@
+# Shows a "Sponsor" button on the repository. Buy Me a Coffee has no native
+# GitHub funding type, so it goes in `custom`.
+custom: ["https://buymeacoffee.com/khaelec"]

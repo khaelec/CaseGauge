@@ -1,5 +1,7 @@
 # CaseGauge — a live PC monitor for a spare screen
 
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-khaelec-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/khaelec)
+
 CaseGauge turns a spare display into an at-a-glance PC stats panel with a live
 wallpaper — a **side monitor**, or a **tablet or phone you already have**, over
 your local WiFi. Open it in any modern browser (Safari on iOS, Chrome on
@@ -22,11 +24,36 @@ licensed by me. They are separate products from their respective authors; you
 obtain and license them yourself, under their own terms. See
 `THIRD-PARTY-NOTICES.md`.
 
-## Requirements
+## What you need to install
 
-- Python 3 (already installed — no pip packages needed)
-- An NVIDIA GPU for the GPU card (`nvidia-smi`, ships with the driver)
-- **LibreHardwareMonitor, running as administrator**, for CPU temperature only
+The released **`CaseGauge.exe` needs no Python** — it bundles its own. What it
+cannot bundle are the programs that read your hardware or supply wallpapers.
+Install the ones you want; CaseGauge uses whatever is present and simply shows
+less when something is missing.
+
+| install this | needed for | if you skip it |
+|---|---|---|
+| **Windows 10/11** | everything | — |
+| NVIDIA driver (`nvidia-smi`) | the GPU card | the GPU card reads `--` |
+| **LibreHardwareMonitor** | CPU temperature | CPU temp reads `--` |
+| ffmpeg *(optional)* | video wallpapers | video wallpapers can't be prepared |
+| Wallpaper Engine *(optional, paid)* | its wallpapers | only the built-in nebula |
+
+```powershell
+winget install LibreHardwareMonitor.LibreHardwareMonitor
+winget install Gyan.FFmpeg
+```
+
+- **LibreHardwareMonitor** must be running **as administrator**, with its web
+  server switched on (Options → Remote Web Server → Run). It self-elevates on
+  launch. See [CPU temperature](#cpu-temperature) for why a kernel driver is
+  involved.
+- **ffmpeg** is used once per video wallpaper; the result is cached, so it is not
+  needed again for that wallpaper.
+- **Wallpaper Engine is not free and is not included here.** If you want its
+  wallpapers, buy it on Steam — see [Credits and legal](#credits-and-legal).
+
+Running from source additionally needs Python 3 (standard library only).
 
 ## Run it
 
@@ -38,7 +65,8 @@ icon: double-click to open the dashboard, right-click for Open dashboard /
 Copy iPad URL / Wallpaper / Zoom / Quit. `stop.bat` is the guaranteed escape
 hatch if the tray ever fails to appear.
 
-It starts with Windows via a Startup shortcut pointing at the exe.
+To start it with Windows, put a shortcut to `CaseGauge.exe` in your Startup
+folder (`shell:startup`).
 
 ### About the exe
 
