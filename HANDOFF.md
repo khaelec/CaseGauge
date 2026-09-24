@@ -372,6 +372,63 @@ Two bugs fell out of building it, both in code that predates it:
 
 ---
 
+## v1.3: making the picker usable
+
+v1.2 listed everything it found, which was honest and unreadable: 81 tiles, 54
+of them greyed-out scene wallpapers repeating the same caption, and every local
+video a blank gradient because none had artwork beside it. The verdict was
+"it's just messy and no previews". Three fixes.
+
+**Thumbnails are generated.** `ensure_poster()` pulls one frame out of a video
+that shipped without artwork, scales it to 360p and caches it in `cache/` as
+`<id>.poster.jpg`. `-ss 1` before `-i` seeks without decoding what it skips, so
+a 4K source costs ~0.25s; a second in also skips the fade-from-black a lot of
+loops open on, and there is a fallback to frame zero for clips shorter than the
+seek. It is done inline in the preview request under a lock, because opening
+the picker asks for every missing thumbnail at once and a dozen parallel 4K
+decodes would bury the 1 Hz stats loop. The picker now requests a preview for
+any video, not just one with a `preview` field, and a tile whose image 404s
+falls back to the lettered gradient instead of a broken-image icon.
+
+**Unusable wallpapers are hidden by default.** The v1.2 decision to show them
+was right in principle and wrong in practice. They are one unticked box away,
+the count line always reports how many are hidden, and the setting lives in
+that device's `localStorage` — it changes what you look at, not what the PC
+shows, so it does not belong in `state.json` with the wallpaper choice.
+
+**The grid is sectioned.** Items carry `group` (the folder they came from, or
+"Wallpaper Engine") and `label` (the file's own name). Headings are full-width
+grid items (`grid-column: 1 / -1`). The label matters: a tile is 176px wide, so
+the old path-prefixed `title` pushed the actual name out of sight. `title` is
+still the full name — it is what `state.json` stores and what the tray shows —
+and it survives as the tile's tooltip.
+
+**Several source folders.** `set_sources()` / `source_roots()` in
+`wallpapers.py`, a list in `state.json`, and add/remove endpoints. Kept as
+module state rather than a `scan()` argument so the tray and the request
+handlers can still call `scan()` and `by_id()` with no arguments. Roots that
+are duplicates or nested inside one another are dropped, or a file would be
+listed twice under two ids. `_local_id()` now digests the **full** path, so the
+same filename under two source folders gets two ids.
+
+A folder dialog from the tray would be nicer than typing a path, but the tray
+is raw ctypes Win32 with no dialog helper, so the picker takes a typed path
+instead. That also means it works from the iPad.
+
+### A trap this turn set
+
+While testing, `sources` kept vanishing from `state.json`. It was not a
+persistence bug: the **running `CaseGauge.exe` shares `E:\Ipad\state.json`
+with any `server.py` started for testing**, and a v1.2 exe has no `sources` key,
+so every save from it wiped the key a v1.3 server had just written. Two servers,
+one state file. `PCSTATS_CACHE` redirects the cache but there is no override for
+`STATE_PATH` — it is always `_HERE/state.json`. To test state honestly, copy
+`server.py`, `tray.py`, `wallpapers.py`, `web/` and `assets/` to a scratch
+directory and run from there with `CASEGAUGE_WALLPAPERS` pointed at the real
+folder.
+
+---
+
 ## Not started, but discussed
 
 - **Video wallpaper sharpness.** `TARGET_HEIGHT = 768` in `wallpapers.py` was
@@ -381,10 +438,6 @@ Two bugs fell out of building it, both in code that predates it:
   ~180 MB) and everything in `cache/` must be re-transcoded (just delete it).
 - **Sparklines.** A 60-second rolling history per card was offered twice and
   never taken up.
-- **Poster frames for local videos.** A local `.mp4` with no sibling image has
-  no thumbnail, so its tile is a plain gradient with the title on it. One
-  `ffmpeg -frames:v 1` per video, cached beside the transcode, would fix it.
-  Offered, not built.
 - **Extra sensors.** LHM exposes GPU Memory Junction (runs much hotter than GPU
   core and is the number that matters on a 5070 Ti), CCD1, VRM MOS, SSD and
   per-DIMM temperatures. Offered, not built.

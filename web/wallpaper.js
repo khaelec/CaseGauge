@@ -255,9 +255,20 @@ window.Wallpaper = (function () {
     var tries = 0;
     function poll() {
       fetch('/api/wallpaper/' + item.id + '/prepare', { cache: 'no-store' })
-        .then(function (r) { return r.json(); })
+        .then(function (r) {
+          // 404 means the server has never heard of this id: the file was
+          // deleted, renamed, or moved to another source folder.
+          return r.status === 404 ? { state: 'gone' } : r.json();
+        })
         .then(function (st) {
           if (current.mode !== 'video' || current.id !== item.id) return;
+
+          if (st.state === 'gone') {
+            missing[keyOf(item)] = true;
+            onStatus('that wallpaper is gone - back to the nebula');
+            apply(current);        // same choice, now drawn as the shader
+            return;
+          }
 
           if (st.state === 'done') {
             onStatus('');

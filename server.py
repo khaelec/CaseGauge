@@ -677,7 +677,7 @@ def default_layout():
     return [{"id": cid, "rows": list(ROW_IDS[cid])} for cid in CARD_ORDER]
 
 
-_ui = {"wallpaper": {"mode": "shader"}, "zoom": 1.0, "disk": "",
+_ui = {"wallpaper": {"mode": "shader"}, "zoom": 1.0, "disk": "", "sources": [],
        "layout": default_layout()}
 _ui_lock = threading.Lock()
 
@@ -724,6 +724,9 @@ def load_state():
         # Older file held the wallpaper choice at the top level.
         _ui = {"wallpaper": saved, "zoom": 1.0}
         return
+    _ui["sources"] = [p for p in (saved.get("sources") or []) if isinstance(p, str)]
+    wallpapers.set_sources(_ui["sources"])
+
     wp = saved.get("wallpaper")
     if isinstance(wp, dict) and wp.get("mode"):
         _ui["wallpaper"] = wp
@@ -776,6 +779,52 @@ def set_wallpaper(choice):
         _ui["wallpaper"] = clean
         _save_locked()
     return dict(clean)
+
+
+def get_sources():
+    with _ui_lock:
+        return list(_ui.get("sources") or [])
+
+
+def add_source(path):
+    """Point the app at another folder of wallpapers.
+
+    Rejected rather than stored if it is not a readable directory: a typo
+    saved into state.json would otherwise be a silent no-op every scan.
+    """
+    path = (path or "").strip().strip('"')
+    if not path:
+        return {"ok": False, "detail": "no folder given", "sources": get_sources()}
+    path = os.path.normpath(os.path.expandvars(os.path.expanduser(path)))
+    if not os.path.isdir(path):
+        return {"ok": False, "detail": "not a folder: " + path,
+                "sources": get_sources()}
+    try:
+        os.listdir(path)
+    except OSError as exc:
+        return {"ok": False, "detail": "cannot read it: %s" % exc,
+                "sources": get_sources()}
+
+    with _ui_lock:
+        current = list(_ui.get("sources") or [])
+        if not any(os.path.normcase(p) == os.path.normcase(path) for p in current):
+            current.append(path)
+            _ui["sources"] = current
+            _save_locked()
+        wallpapers.set_sources(current)
+        out = list(current)
+    return {"ok": True, "detail": "", "sources": out}
+
+
+def remove_source(path):
+    with _ui_lock:
+        current = [p for p in (_ui.get("sources") or [])
+                   if os.path.normcase(p) != os.path.normcase(path or "")]
+        _ui["sources"] = current
+        _save_locked()
+        wallpapers.set_sources(current)
+        out = list(current)
+    return {"ok": True, "detail": "", "sources": out}
 
 
 def get_disk_root():
@@ -1130,7 +1179,18 @@ class Handler(SimpleHTTPRequestHandler):
                 "ffmpeg": bool(wallpapers.FFMPEG),
                 # So the picker can tell the user where to drop their own.
                 "local_dir": wallpapers.local_dir(),
+                "sources": get_sources(),
             })
+            return
+
+        if route == "/api/wallpaper/source/add":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            self._json(add_source((q.get("path") or [""])[0]))
+            return
+
+        if route == "/api/wallpaper/source/remove":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            self._json(remove_source((q.get("path") or [""])[0]))
             return
 
         parts = [p for p in route.split("/") if p]
@@ -1173,10 +1233,16 @@ class Handler(SimpleHTTPRequestHandler):
                 return
 
             if what == "preview":
-                if not item["preview"]:
+                if item["preview"]:
+                    self._send_file(
+                        wallpapers.safe_join(item["folder"], item["preview"]))
+                    return
+                # No artwork beside it: pull a frame out of the video itself.
+                poster = wallpapers.ensure_poster(item, CACHE_DIR)
+                if not poster:
                     self.send_error(404)
                     return
-                self._send_file(wallpapers.safe_join(item["folder"], item["preview"]))
+                self._send_file(poster)
                 return
 
             if what == "web":

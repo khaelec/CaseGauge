@@ -124,22 +124,58 @@ def _app_dir():
 
 
 def local_dir():
-    """The folder the user drops their own wallpapers into."""
+    """The folder beside the exe. Always scanned, always exists."""
     return (os.environ.get("CASEGAUGE_WALLPAPERS")
             or os.path.join(_app_dir(), LOCAL_DIR_NAME))
 
 
-def _local_id(rel):
+# Folders the user has pointed the app at, on top of the one beside the exe.
+# The server owns the list and persists it in state.json; this is only where
+# the scan reads it from, which keeps scan() and by_id() callable with no
+# arguments from the tray and the request handlers alike.
+_extra_sources = []
+
+
+def set_sources(paths):
+    """Replace the user-chosen source folders."""
+    global _extra_sources
+    _extra_sources = [p for p in (paths or []) if p]
+
+
+def source_roots():
+    """Every folder holding the user's own wallpapers, the built-in one first.
+
+    Duplicates and folders nested inside one another are dropped, or a file
+    would be listed twice under two different ids.
+    """
+    roots = []
+    for path in [local_dir()] + list(_extra_sources):
+        try:
+            real = os.path.realpath(path)
+        except OSError:
+            continue
+        if not os.path.isdir(real):
+            continue
+        if any(real == r or real.startswith(r + os.sep) or
+               r.startswith(real + os.sep) for r in roots):
+            continue
+        roots.append(real)
+    return roots
+
+
+def _local_id(root, rel):
     """A stable, filesystem- and URL-safe id.
 
     It is written into state.json as the current wallpaper, so it has to
-    survive a restart: renaming the file is the one thing that changes it.
-    The digest keeps two names that slugify alike from colliding.
+    survive a restart: moving or renaming the file is the only thing that
+    changes it. The digest covers the full path, so the same file name under
+    two different source folders still gets two ids.
     """
-    rel = rel.replace("\\", "/")
-    slug = re.sub(r"[^A-Za-z0-9_-]+", "-", os.path.splitext(rel)[0]).strip("-")
-    digest = hashlib.sha1(rel.lower().encode("utf-8")).hexdigest()[:8]
-    return "local-%s-%s" % (digest, slug[:48].lower() or "item")
+    full = os.path.join(root, rel).replace("\\", "/")
+    slug = re.sub(r"[^A-Za-z0-9_-]+", "-",
+                  os.path.splitext(os.path.basename(rel))[0]).strip("-")
+    digest = hashlib.sha1(full.lower().encode("utf-8")).hexdigest()[:8]
+    return "local-%s-%s" % (digest, slug[:40].lower() or "item")
 
 
 # ---------------------------------------------------------------------------
@@ -185,13 +221,23 @@ def _reason_for(project, kind, entry, path):
     return "Unsupported type: " + kind
 
 
-def _entry(wid, title, kind, entry, folder, preview, source, reason=""):
+def _entry(wid, title, kind, entry, folder, preview, source, reason="",
+           group=""):
+    """One wallpaper.
+
+    'title' is the full name, stored in state.json and shown in the tray.
+    'label' is what the tile prints - just the file's own name, because a tile
+    is 176px wide and a path prefix pushes the actual name out of sight.
+    'group' is the heading it files under.
+    """
     path = os.path.join(folder, entry) if entry else ""
     exists = os.path.isfile(path)
     supported = kind in ("video", "web", "image") and exists
     return {
         "id": wid,
         "title": title,
+        "label": title.rsplit("/", 1)[-1],
+        "group": group,
         "type": kind,
         "entry": entry,
         "folder": folder,
@@ -203,7 +249,7 @@ def _entry(wid, title, kind, entry, folder, preview, source, reason=""):
     }
 
 
-def _project_item(folder, wid, source):
+def _project_item(folder, wid, source, group=""):
     """One wallpaper read from a project.json, or None if there isn't one."""
     try:
         with open(os.path.join(folder, "project.json"),
@@ -219,7 +265,7 @@ def _project_item(folder, wid, source):
     path = os.path.join(folder, entry) if entry else ""
     return _entry(wid, project.get("title") or wid, kind, entry, folder,
                   _preview_for(folder, project), source,
-                  _reason_for(project, kind, entry, path))
+                  _reason_for(project, kind, entry, path), group)
 
 
 # How far down to follow subfolders. Deep enough for the way people actually
@@ -227,23 +273,26 @@ def _project_item(folder, wid, source):
 _MAX_DEPTH = 4
 
 
-def _single_wallpaper(folder, rel, name):
+def _single_wallpaper(root, folder, rel, name, group):
     """A folder that IS one wallpaper rather than a drawer holding several:
     a copied workshop item, or a web wallpaper with an index.html."""
-    item = _project_item(folder, _local_id(rel), "local")
+    wid = _local_id(root, rel)
+    item = _project_item(folder, wid, "local", group)
     if item:
         return item
     if os.path.isfile(os.path.join(folder, "index.html")):
-        return _entry(_local_id(rel), name, "web", "index.html", folder,
-                      _preview_for(folder, {}), "local")
+        return _entry(wid, name, "web", "index.html", folder,
+                      _preview_for(folder, {}), "local", "", group)
     return None
 
 
-def _walk_local(folder, rel, depth, items):
+def _walk_local(root, folder, rel, depth, items, group):
     """Collect every wallpaper at or below folder.
 
     A drawer of twenty videos should list twenty wallpapers, not one, so
     ordinary folders are descended into rather than treated as a single item.
+    'group' is the heading these file under: the containing folder's name, so
+    the picker can show "Frieren" over the six loops that live in it.
     """
     try:
         names = sorted(os.listdir(folder))
@@ -273,40 +322,48 @@ def _walk_local(folder, rel, depth, items):
         if os.path.isdir(path):
             if depth >= _MAX_DEPTH:
                 continue
-            one = _single_wallpaper(path, child, titled(name))
+            one = _single_wallpaper(root, path, child, titled(name), group)
             if one:
                 items.append(one)
                 found += 1
                 continue
             before = len(items)
-            _walk_local(path, child, depth + 1, items)
+            _walk_local(root, path, child, depth + 1, items, child)
             found += len(items) - before
         elif lower.endswith(_VIDEO_EXTS):
-            items.append(_entry(_local_id(child), titled(os.path.splitext(name)[0]),
+            items.append(_entry(_local_id(root, child),
+                                titled(os.path.splitext(name)[0]),
                                 "video", name, folder,
-                                _sibling_preview(folder, name), "local"))
+                                _sibling_preview(folder, name), "local", "",
+                                group))
             found += 1
         elif lower.endswith(_IMAGE_EXTS) and lower not in thumbs:
             # A still needs no preview of its own: it is its own thumbnail.
-            items.append(_entry(_local_id(child), titled(os.path.splitext(name)[0]),
-                                "image", name, folder, name, "local"))
+            items.append(_entry(_local_id(root, child),
+                                titled(os.path.splitext(name)[0]),
+                                "image", name, folder, name, "local", "",
+                                group))
             found += 1
 
     # A folder with files in it but nothing usable is worth saying out loud;
     # an empty one is not.
     if rel and not found and names:
-        items.append(_entry(_local_id(rel), rel, "", "", folder,
+        items.append(_entry(_local_id(root, rel), rel, "", "", folder,
                             _preview_for(folder, {}), "local",
                             "Nothing usable in this folder - no picture, "
-                            "video or index.html"))
+                            "video or index.html", group))
 
 
 def _local_items():
-    root = local_dir()
-    if not os.path.isdir(root):
-        return []
     items = []
-    _walk_local(root, "", 0, items)
+    builtin = os.path.realpath(local_dir())
+    for root in source_roots():
+        # Files sitting loose at the top of a source folder are grouped under
+        # that folder's own name, so two added folders stay separate sections.
+        # The built-in one keeps the friendlier "Your folder" heading: its real
+        # name is an implementation detail the user never chose.
+        group = "" if root == builtin else os.path.basename(root)
+        _walk_local(root, root, "", 0, items, group)
     return items
 
 
@@ -323,7 +380,8 @@ def scan():
         except OSError:
             continue
         for wid in names:
-            item = _project_item(os.path.join(root, wid), wid, "workshop")
+            item = _project_item(os.path.join(root, wid), wid, "workshop",
+                                 "Wallpaper Engine")
             if item:
                 items.append(item)
 
@@ -424,6 +482,79 @@ _jobs_lock = threading.Lock()
 
 def cache_path(cache_dir, wid):
     return os.path.join(cache_dir, wid + ".mp4")
+
+
+# A local video usually has no artwork beside it, and a wall of blank tiles is
+# no way to pick a wallpaper. One frame out of the file makes the thumbnail.
+_poster_lock = threading.Lock()
+
+
+def poster_path(cache_dir, wid):
+    return os.path.join(cache_dir, wid + ".poster.jpg")
+
+
+def ensure_poster(item, cache_dir):
+    """A thumbnail for a video that shipped without one, or None.
+
+    Cheap enough to do inline: ffmpeg seeks to a keyframe and decodes a single
+    frame, so even a 4K source costs well under a second, and the result is
+    cached for good.
+    """
+    if item["type"] != "video" or not FFMPEG:
+        return None
+
+    out = poster_path(cache_dir, item["id"])
+    if os.path.isfile(out):
+        return out
+
+    src = os.path.join(item["folder"], item["entry"])
+    if not os.path.isfile(src):
+        return None
+
+    # One at a time. Opening the picker asks for every missing thumbnail at
+    # once, and a dozen parallel 4K decodes would bury the 1 Hz stats loop.
+    with _poster_lock:
+        if os.path.isfile(out):
+            return out
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+        except OSError:
+            return None
+
+        tmp = out + ".part"
+        # -ss before -i seeks without decoding what it skips. A second in
+        # avoids the fade-from-black a lot of loops open on.
+        cmd = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
+               "-ss", "1", "-i", src, "-frames:v", "1",
+               "-vf", "scale=-2:360:flags=bicubic",
+               "-q:v", "4", "-f", "image2", tmp]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=60, creationflags=_NO_WINDOW)
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+        # A clip shorter than the seek yields nothing; take frame one instead.
+        if proc.returncode != 0 or not os.path.isfile(tmp):
+            cmd = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
+                   "-i", src, "-frames:v", "1",
+                   "-vf", "scale=-2:360:flags=bicubic",
+                   "-q:v", "4", "-f", "image2", tmp]
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True,
+                                      timeout=60, creationflags=_NO_WINDOW)
+            except (OSError, subprocess.SubprocessError):
+                return None
+
+        if proc.returncode != 0 or not os.path.isfile(tmp):
+            if os.path.isfile(tmp):
+                os.remove(tmp)
+            return None
+        try:
+            os.replace(tmp, out)
+        except OSError:
+            return None
+        return out
 
 
 def job_status(wid):

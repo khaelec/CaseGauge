@@ -449,9 +449,10 @@
     fetch('/api/wallpaper/select' + q, { cache: 'no-store' }).catch(function () {});
   }
 
-  function tile(choice, label, badge, imgSrc, active, reason) {
+  function tile(choice, label, badge, imgSrc, active, reason, full) {
     var el = document.createElement('button');
     el.type = 'button';
+    if (full && full !== label) el.title = full;
     el.className = 'tile' + (active ? ' is-active' : '') +
                    (imgSrc ? '' : ' tile-shader') +
                    (reason ? ' is-blocked' : '');
@@ -459,6 +460,18 @@
       var img = document.createElement('img');
       img.loading = 'lazy';
       img.alt = '';
+      // No thumbnail could be made: fall back to the plain lettered tile
+      // rather than showing a broken image.
+      img.addEventListener('error', function () {
+        el.classList.add('tile-shader');
+        img.remove();
+        if (!el.querySelector('.tile-fallback')) {
+          var t = document.createElement('span');
+          t.className = 'tile-fallback';
+          t.textContent = label;
+          el.insertBefore(t, el.firstChild);
+        }
+      });
       img.src = imgSrc;
       el.appendChild(img);
     } else {
@@ -490,6 +503,58 @@
     return el;
   }
 
+  // Whether to draw the wallpapers that cannot be used. On by default: a
+  // workshop library is mostly scene wallpapers, and fifty identical grey
+  // tiles bury the handful that actually work. Kept per device rather than on
+  // the server, because it changes what you look at, not what the PC shows.
+  var hideUnusable = true;
+  try {
+    hideUnusable = localStorage.getItem('wpHideUnusable') !== '0';
+  } catch (e) {}
+
+  function heading(text, count) {
+    var h = document.createElement('div');
+    h.className = 'pick-heading';
+    h.textContent = text;
+    if (count) {
+      var c = document.createElement('span');
+      c.textContent = count;
+      h.appendChild(c);
+    }
+    return h;
+  }
+
+  function renderSources(data) {
+    var box = $('pick-sources');
+    box.innerHTML = '';
+    var list = [data.local_dir].concat(data.sources || []);
+    list.forEach(function (path, idx) {
+      if (!path) return;
+      var chip = document.createElement('span');
+      chip.className = 'source-chip';
+      var label = document.createElement('span');
+      label.textContent = path;
+      chip.appendChild(label);
+      // The folder beside the app is not removable; it is where the app
+      // itself puts things, and losing it would leave no default at all.
+      if (idx > 0) {
+        var x = document.createElement('button');
+        x.type = 'button';
+        x.className = 'source-drop';
+        x.textContent = '×';
+        x.title = 'Stop scanning this folder';
+        x.addEventListener('click', function () {
+          fetch('/api/wallpaper/source/remove?path=' + encodeURIComponent(path),
+                { cache: 'no-store' })
+            .then(function () { buildPicker(); })
+            .catch(function () {});
+        });
+        chip.appendChild(x);
+      }
+      box.appendChild(chip);
+    });
+  }
+
   function buildPicker() {
     fetch('/api/wallpapers', { cache: 'no-store' })
       .then(function (r) { return r.json(); })
@@ -498,38 +563,68 @@
         grid.innerHTML = '';
         var active = Wallpaper.current();
 
+        renderSources(data);
+
+        var all = data.items || [];
+        var usable = 0;
+        all.forEach(function (i) { if (i.supported) usable++; });
+        var shown = hideUnusable
+          ? all.filter(function (i) { return i.supported; })
+          : all;
+
+        grid.appendChild(heading('Built-in', ''));
         grid.appendChild(tile(
           { mode: 'shader' }, 'Built-in nebula', 'shader', null,
           active.mode === 'shader'
         ));
 
-        // Unusable ones are drawn too, greyed out and captioned. Filtering
-        // them out made a rejected wallpaper look like one that was never
-        // scanned at all, which is the harder problem to diagnose.
-        var all = data.items || [];
-        var usable = 0;
-        all.forEach(function (i) {
-          if (i.supported) usable++;
-          var choice = { mode: i.type, id: i.id, title: i.title };
-          grid.appendChild(tile(
-            choice, i.title,
-            (i.source === 'local' ? 'local ' : '') + (i.type || 'unknown'),
-            i.preview ? '/media/' + i.id + '/preview' : null,
-            i.supported && active.mode === i.type && active.id === i.id,
-            i.supported ? '' : (i.reason || 'Cannot be used here')
-          ));
+        // Grouped under the folder each one came out of, so a drawer of six
+        // Frieren loops reads as one section rather than six loose tiles.
+        var order = [];
+        var groups = {};
+        shown.forEach(function (i) {
+          var key = i.group || (i.source === 'local' ? 'Your folder'
+                                                     : 'Wallpaper Engine');
+          if (!groups[key]) { groups[key] = []; order.push(key); }
+          groups[key].push(i);
+        });
+        // Your own folders first; the workshop is the long tail.
+        order.sort(function (a, b) {
+          var la = groups[a][0].source === 'local' ? 0 : 1;
+          var lb = groups[b][0].source === 'local' ? 0 : 1;
+          return la - lb || a.localeCompare(b);
+        });
+
+        order.forEach(function (key) {
+          var list = groups[key];
+          grid.appendChild(heading(key, list.length));
+          list.forEach(function (i) {
+            var choice = { mode: i.type, id: i.id, title: i.title };
+            // A video with no artwork beside it still gets a thumbnail: the
+            // server pulls a frame out of the file itself.
+            var img = (i.preview || i.type === 'video')
+              ? '/media/' + i.id + '/preview' : null;
+            grid.appendChild(tile(
+              choice, i.label || i.title, i.type || 'unknown', img,
+              i.supported && active.mode === i.type && active.id === i.id,
+              i.supported ? '' : (i.reason || 'Cannot be used here'),
+              i.title
+            ));
+          });
         });
 
         var build = $('build') ? $('build').textContent : '?';
+        var hidden = all.length - shown.length;
         setText($('pick-count'),
-                usable + ' of ' + all.length + ' usable  ·  build ' + build);
+                usable + ' of ' + all.length + ' usable' +
+                (hidden ? '  ·  ' + hidden + ' hidden' : '') +
+                '  ·  build ' + build);
 
-        var note = 'Your own pictures and videos go in ' +
-                   (data.local_dir || 'the wallpapers folder beside the app') +
-                   ' - .jpg .png .gif .webp .mp4 .webm, or a folder holding one.';
+        var note = 'Drop pictures and videos into a folder above, or add '
+                 + 'another - .jpg .png .gif .webp .mp4 .webm all work.';
         if (!data.ffmpeg) {
-          note += ' ffmpeg was not found, so videos cannot be prepared; ' +
-                  'pictures still work.';
+          note += ' ffmpeg was not found, so videos cannot be prepared; '
+                + 'pictures still work.';
         }
         setText($('pick-note'), note);
       })
@@ -537,6 +632,34 @@
         setText($('pick-note'), 'Could not read the wallpaper library.');
       });
   }
+
+  $('pick-hide').checked = hideUnusable;
+  $('pick-hide').addEventListener('change', function () {
+    hideUnusable = this.checked;
+    try { localStorage.setItem('wpHideUnusable', hideUnusable ? '1' : '0'); }
+    catch (e) {}
+    buildPicker();
+  });
+
+  function addSource() {
+    var input = $('pick-path');
+    var path = (input.value || '').trim();
+    if (!path) return;
+    setText($('pick-note'), 'adding ' + path + '...');
+    fetch('/api/wallpaper/source/add?path=' + encodeURIComponent(path),
+          { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (res) {
+        if (res.ok) { input.value = ''; buildPicker(); }
+        else setText($('pick-note'), res.detail || 'could not add that folder');
+      })
+      .catch(function () { setText($('pick-note'), 'server unreachable'); });
+  }
+
+  $('pick-add').addEventListener('click', addSource);
+  $('pick-path').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') addSource();
+  });
 
   $('pick-open').addEventListener('click', function () {
     $('picker').hidden = false;

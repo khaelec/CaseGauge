@@ -400,11 +400,18 @@ The dashboard server needs no elevation of its own, so a Startup shortcut to
 Tap **Wallpaper** in the top right. The picker lists two libraries: your own
 `wallpapers` folder first, then anything Wallpaper Engine has downloaded.
 
-### Your own folder
+### Your own folders
 
 `wallpapers\` beside the exe is yours. It needs neither Steam nor Wallpaper
 Engine, so whatever you put in it travels with the app — copy the folder to
 another PC and the wallpapers come along.
+
+You can point the app at other folders too, without moving a file. Type or
+paste a path into the box at the top of the picker and press **Add**; it is
+checked before it is stored, so a typo is refused rather than silently
+ignored. Added folders are listed as chips under the box and dropped with the
+**×** beside them. They persist in `state.json`, and the built-in folder can
+never be removed.
 
 | drop in | becomes |
 |---|---|
@@ -423,10 +430,17 @@ native case and the cheapest: one already at or under 768p is copied rather
 than re-encoded. Everything else is transcoded to .mp4 first, so it needs
 ffmpeg.
 
-Subfolders are followed four deep, and names are prefixed by the folder they
-sit in, so `Frieren/odyssey.mp4` lists as *Frieren/odyssey*. Drop a file in
-and reopen the picker — the folder is re-read every time it opens, so there is
-nothing to restart. Set `CASEGAUGE_WALLPAPERS` to put the folder elsewhere.
+Subfolders are followed four deep, and each one becomes a **section** in the
+picker — drop six loops in a `Frieren` folder and they appear under a *Frieren*
+heading. Drop a file in and reopen the picker: the folders are re-read every
+time it opens, so there is nothing to restart. Set `CASEGAUGE_WALLPAPERS` to
+move the built-in folder elsewhere.
+
+**Thumbnails come for free.** A video with no artwork beside it gets one
+anyway: the server pulls a frame out of the file itself (one second in, to
+skip the fade-in a lot of loops open on) and caches it in `cache/`. It costs
+about a quarter of a second even for a 4K source. Drop a `name.jpg` beside
+`name.mp4` to override it.
 
 ### Wallpaper Engine
 
@@ -448,11 +462,16 @@ A workshop library is mostly scenes — roughly 20 usable of 70 is typical.
 Scene wallpapers are the ones Wallpaper Engine advertises as "live", so a
 newly downloaded one very often turns out to be unusable here.
 
-**Unusable wallpapers are still listed**, greyed out and captioned with the
-reason. They used to be hidden, which made a wallpaper the scan had rejected
-look exactly like one it had never found. If a new download does not appear
-at all, it is not in any scanned folder; if it appears greyed out, the caption
-says why.
+**Unusable wallpapers are hidden by default**, because a workshop library is
+mostly scenes and fifty identical grey tiles bury the handful that work. Untick
+**Hide unusable** in the picker to see them: they come back greyed out and
+captioned with the reason. The count line always says how many are hidden, so
+nothing disappears silently — "27 of 80 usable · 53 hidden".
+
+The setting is remembered per device, in that browser's storage, because it
+changes what you are looking at rather than what the PC is showing. If a new
+download does not appear even with the box unticked, it is not in any scanned
+folder.
 
 A preset — a saved settings file with a `dependency` on another wallpaper — is
 listed too, and is never usable on its own.

@@ -614,6 +614,109 @@ body.is-idle .bar-right .zoom {
   padding: 0.3em 0.6em;
 }
 
+/* A full-width heading inside the grid, so each source folder reads as its
+   own section instead of the whole library running together. */
+.pick-heading {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: baseline;
+  gap: 0.5em;
+  margin: 0.5em 0 -0.2em;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+.pick-heading span {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  opacity: 0.7;
+}
+
+.picker-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.picker-spacer { flex: 1; }
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45em;
+  font-size: clamp(10px, 1.2vw, 13px);
+  color: var(--ink-faint);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.toggle input { width: 15px; height: 15px; accent-color: var(--accent); }
+
+.picker-input {
+  flex: 1 1 220px;
+  min-width: 150px;
+  padding: 0.45em 0.7em;
+  font: inherit;
+  font-size: clamp(10px, 1.2vw, 13px);
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 9px;
+}
+
+.picker-input::placeholder { color: var(--ink-faint); opacity: 0.8; }
+.picker-input:focus { outline: none; border-color: var(--accent); }
+
+.picker-sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.source-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+  max-width: 100%;
+  padding: 0.28em 0.6em;
+  font-size: 10px;
+  color: var(--ink-faint);
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 999px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-drop {
+  border: 0;
+  padding: 0 0.15em;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--ink-faint);
+  background: none;
+  cursor: pointer;
+}
+
+.source-drop:hover { color: var(--ink); }
+
+/* Stands in for a thumbnail that could not be made. */
+.tile-fallback {
+  padding: 0 0.6em;
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+  overflow: hidden;
+}
+
 /* Listed but not selectable. Shown rather than hidden, so a wallpaper the
    scan rejected cannot be mistaken for one it never found. */
 .tile.is-blocked { cursor: default; }
