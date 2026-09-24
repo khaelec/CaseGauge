@@ -273,6 +273,24 @@ A card hidden from the list is `display:none` and the grid is rebuilt from the
 visible cards as explicit fractions, so the equal-width columns and the
 "numbers don't jump" guarantee both survive. At least one card always remains.
 
+### More than one GPU
+
+Every GPU in the machine gets a card of its own - a second discrete card, or the
+graphics built into the CPU. They are found through both sources at once:
+`nvidia-smi` lists every NVIDIA card it can see, LibreHardwareMonitor covers AMD
+and Intel, and a card both can see produces **one** card, not two. They are
+ordered by VRAM, so the big card leads and an onboard chip comes last.
+
+The extra cards are **off by default**, because the second GPU is usually one
+nobody wants a card for. They appear in **Layout ▸** (on the page and in the
+tray) as *GPU 2*, *GPU 3* - tick one to bring it in, and the cards on screen
+relabel themselves *GPU 1* / *GPU 2* once there is more than one. Up to four.
+
+A GPU that appears while CaseGauge is running is offered within a second, no
+restart. One that disappears has its card removed after 90 seconds - long
+enough that LibreHardwareMonitor starting up late, which is when a GPU only it
+can see first shows up, does not make a card flicker in and out.
+
 ### Per-core load
 
 The CPU card shows a small square beside the temperature: one bar per **logical
@@ -622,6 +640,31 @@ Android's Home Screen install would want a `manifest.json`, which is not shipped
 (the page uses the iOS `apple-touch-icon`). The dashboard still runs fine
 without one.
 
+### Old tablets (Chrome 85 / Android 5)
+
+An old tablet is a perfectly good second panel, and the dashboard works on one -
+but two CSS properties it relies on are newer than Chrome 87, so before v1.4 the
+**wallpaper picker opened a full screen below the fold**, where it could not be
+scrolled to, and the thumbnails inside it collapsed to a hairline. That is why
+wallpapers looked broken on such a device: not the wallpapers, the picker. Both
+now have fallbacks (`top/right/bottom/left` instead of `inset`, and a
+`@supports` block for `aspect-ratio`), which change nothing on a current
+browser.
+
+What can still genuinely be beyond an old tablet, in the order worth trying:
+
+| mode | what it needs | on a 2014 tablet |
+|---|---|---|
+| **image** | an `<img>` | works - try this first |
+| **video** | H.264 High profile, 768p, no audio | usually works; the SoC decodes it |
+| **shader** | WebGL 1 | needs OpenGL ES 2.0 *and* a driver Chrome has not blocklisted |
+| **web** | WebGL/canvas at full speed in an iframe | expect this one to be too much |
+
+If the built-in nebula is the thing that does not appear, the page now says so
+on the hint line under the cards ("no WebGL on this browser") rather than just
+going dark - pick a picture or a video instead and the rest of the dashboard is
+unaffected.
+
 ## Credits and legal
 
 CaseGauge is licensed under the **Apache License 2.0** (see `LICENSE`). It is
@@ -676,6 +719,10 @@ coffee — it is a voluntary tip, not a purchase, and it unlocks nothing:
 ## Known limits
 
 - No authentication or TLS. LAN only, `Private` firewall profile only.
+- **Multi-GPU is matched by name.** An NVIDIA card seen by both `nvidia-smi` and
+  LibreHardwareMonitor is recognised as one card because the two names match. A
+  driver that names the same card differently in each would show it twice; the
+  fix is a line in `_gpu_key()`.
 - **AMD and Intel GPUs are supported but untested.** NVIDIA uses `nvidia-smi`;
   anything else falls back to LibreHardwareMonitor (its Temperatures, Load,
   Powers, Fans and Data groups), which covers all three vendors but has only

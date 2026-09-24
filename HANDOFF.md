@@ -25,13 +25,23 @@ hand-edited file (Notepad/PowerShell) usually carries a BOM that plain
 `json.load` rejects. `kiosk.ps1` resolves the port the same way. One server
 serves every client, so multiple devices do **not** need multiple ports.
 
-**GPU sources.** `poll_once()` takes the GPU from `nvidia-smi` first (NVIDIA,
-no admin), then from LHM's tree (`_lhm_gpu_from_tree`). Lookups are keyed on
-**(group, label)** because "GPU Core" appears under both Temperatures and Load.
-AMD and Intel are supported this way but are **untested** - the author has no
-such hardware. The first GPU poll writes every LHM sensor label to
-`CaseGauge.log`, so a mismatch is reportable. Do not rewrite it as "works on
-AMD/Intel"; it is "should work, unproven".
+**GPU sources.** `poll_once()` reads **both** sources every poll and
+`merge_gpus()` folds them into one list: `read_gpus()` returns every line
+`nvidia-smi` prints (NVIDIA, no admin), `_lhm_gpus_from_tree()` returns every
+GPU device in LHM's tree (the only source for AMD and Intel, and for the memory
+junction on any card). Lookups are keyed on **(group, label)** because "GPU
+Core" appears under both Temperatures and Load. AMD and Intel are supported this
+way but are **untested** - the author has no such hardware. The first poll of
+each GPU writes its LHM sensor labels to `CaseGauge.log`, so a mismatch is
+reportable. Do not rewrite it as "works on AMD/Intel"; it is "should work,
+unproven".
+
+The merge matches a card by name (`_gpu_key()`), and each LHM reading claims **at
+most one** nvidia-smi entry - that is what keeps two identical cards from
+collapsing into one while still merging each of them. Validated on two RTX 5070
+Ti: two cards, distinct readings, no duplicate. The snapshot carries `gpus`
+(the list) and `gpu` (the leading card, kept only so a page cached from an older
+build still paints something).
 
 **Client platforms.** The server is always the PC; there is no Android build.
 The page is deliberately platform-agnostic: `apple-touch-icon` for iOS, a
@@ -426,6 +436,89 @@ one state file. `PCSTATS_CACHE` redirects the cache but there is no override for
 `server.py`, `tray.py`, `wallpapers.py`, `web/` and `assets/` to a scratch
 directory and run from there with `CASEGAUGE_WALLPAPERS` pointed at the real
 folder.
+
+---
+
+## v1.4: a card per GPU
+
+Two GPUs in the machine, one on the dashboard. Both sources were written to
+return the single best card - `read_gpu()` parsed `splitlines()[0]` and threw
+the rest away, `_lhm_gpu_from_tree()` kept whichever device had the most VRAM -
+so the second card was not lost, it was never read.
+
+Both now return lists, and `merge_gpus()` folds them together. The interesting
+case is two **identical** cards: matching LHM readings to nvidia-smi entries by
+name alone would put both onto the first entry and leave the second untouched,
+so each LHM reading claims at most one unclaimed entry. Ordering is by VRAM,
+descending and stable, which keeps a discrete card ahead of an onboard one and
+leaves two identical cards in bus order.
+
+**The extra cards are opt-in.** This was the user's call and it is the right
+one: a second GPU is most often integrated graphics nobody wants a card for.
+`sync_gpu_cards()` therefore only makes the card *available* - it raises
+`_gpu_cards`, which is what `card_ids()` and so the Layout menus are built from
+- and never inserts it into the layout. `default_layout()` stops at the first
+GPU, so **Reset** does not drag the extras back in.
+
+It does the reverse, though: a GPU that goes away has its card dropped from the
+layout, after `GPU_DROP_GRACE` (90s). Without the delay, LHM starting a minute
+after CaseGauge - the normal case for an AMD or Intel GPU - would offer a card
+and then remove it moments later. `load_state()` also raises `_gpu_cards` to
+cover whatever GPU ids the saved layout mentions, or `_clean_layout()` would
+drop them as unknown before the first reading has come in.
+
+Ids are `gpu`, `gpu2`, `gpu3`: the first keeps the bare id, so a `state.json`
+written by v1.3 still means what it meant. On the page, card 1 keeps the element
+ids it always had and the others are clones with every inner id suffixed
+(`gpu-temp-gpu2`), so `gel(cardId, base)` finds either.
+
+**Two labels, on purpose.** The Layout editor and the tray say "GPU 1" / "GPU 2"
+as soon as two GPUs exist, because you have to tell apart what you are ticking.
+The heading on the card only numbers itself once two cards are actually on
+screen - with one card there is nothing to distinguish it from, and "GPU 1"
+beside no GPU 2 just raises a question.
+
+**A bug this uncovered.** `server.main()` passes `layout_schema` (a function) to
+`tray.run()`, which did `for card in layout_schema:`. That raises `TypeError`,
+and the whole Layout submenu is built inside one `try/except Exception`, so the
+tray has silently had **no Layout menu at all** since the feature was added.
+Now called through `_schema()`, which also re-reads it on every open - necessary
+here, since the card list changes when a GPU appears.
+
+Verified on the real hardware: two RTX 5070 Ti, distinct temperatures (33 vs
+37 C) and loads, no duplicate element ids, four equal columns in landscape and
+four weighted rows in portrait with no overflow.
+
+### The old-tablet bug found in the same turn
+
+A second viewer arrived: an Android 5.0.2 tablet on **Chrome 85**. The dashboard
+rendered; "wallpapers do not work". The cause was not the wallpapers.
+
+`inset: 0` is **Chrome 87**. Chrome 85 drops it, and a `position: fixed` box with
+auto offsets falls back to its *static* position. `#wallpaper` survived because
+it also carries `width/height: 100%` - but `.picker`, which has neither, landed
+at **y = 720 in a 720px viewport** with `scrollHeight` equal to `innerHeight`.
+The wallpaper picker, and the Layout panel that shares the class, were one full
+screen below the fold and unreachable by scrolling. `aspect-ratio` is **Chrome
+88**, so the picker tiles and the per-core square, which get their whole height
+from it, collapsed as well.
+
+Both now have fallbacks: longhand offsets everywhere, and the heights under
+`@supports not (aspect-ratio: 1 / 1)`.
+
+**Testing this honestly is the interesting part.** Stripping `inset` from a copy
+of `style.css` and serving it is a faithful simulation - an unknown property is
+exactly what Chrome 85 sees - and that is how the picker's position was
+measured. It does **not** work for the `@supports` fallback: this Chromium
+supports `aspect-ratio`, so the guard is false however the declarations are
+stripped. Verify that block by swapping the guard for one that is true here
+(`@supports (display: grid)`) and measuring what the declarations produce: 95x95
+cores, 176x94 tiles. Then check the real file still gives 176x110.
+
+Not fixed, and not worth fixing blind: whether WebGL, H.264 High profile or an
+iframe web wallpaper actually run on that SoC. `initGL()` now says "no WebGL on
+this browser" on the hint line instead of silently painting a gradient, which
+turns the remaining unknown into something the user can read off the screen.
 
 ---
 

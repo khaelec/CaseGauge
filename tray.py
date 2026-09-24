@@ -209,6 +209,21 @@ def run(url, lan_url, on_quit=None, tooltip="CaseGauge",
     disk_by_id = {}
     layout_by_id = {}
 
+    def _schema():
+        """The card list, re-read every time it is needed.
+
+        The server hands this over as a callable rather than a fixed list on
+        purpose: the set of cards can change while running - a second GPU
+        appearing adds one - so a snapshot taken when the tray started would go
+        stale, and iterating the callable itself silently lost the whole menu.
+        """
+        try:
+            if callable(layout_schema):
+                return layout_schema() or []
+            return layout_schema or []
+        except Exception:
+            return []
+
     def _edit_layout(action):
         """Apply one menu action to the current layout and save it."""
         layout = [{"id": c.get("id"), "rows": list(c.get("rows") or [])}
@@ -223,10 +238,20 @@ def run(url, lan_url, on_quit=None, tooltip="CaseGauge",
                 layout = [c for c in layout if c["id"] != cid]
             else:
                 rows = []
-                for card in (layout_schema or []):
+                for card in _schema():
                     if card.get("id") == cid:
                         rows = [r["id"] for r in card.get("rows") or []]
-                layout.append({"id": cid, "rows": rows})
+                # Back beside its own kind - "gpu2" next to "gpu" - rather than
+                # at the end of the list, which is not where it was hidden from.
+                stem = cid.rstrip("0123456789")
+                at = -1
+                for i, c in enumerate(layout):
+                    if c["id"].rstrip("0123456789") == stem:
+                        at = i + 1
+                if at < 0:
+                    layout.append({"id": cid, "rows": rows})
+                else:
+                    layout.insert(at, {"id": cid, "rows": rows})
         elif kind == "toggle_row":
             cid, row = action[1], action[2]
             for c in layout:
@@ -373,7 +398,7 @@ def run(url, lan_url, on_quit=None, tooltip="CaseGauge",
             try:
                 lmenu = user32.CreatePopupMenu()
                 ident = ID_LAYOUT_BASE
-                for card in layout_schema:
+                for card in _schema():
                     cid = card.get("id")
                     cmenu = user32.CreatePopupMenu()
 

@@ -8,7 +8,7 @@ Standard library only - no pip installs, no build step.
 Sensor sources:
   RAM       GlobalMemoryStatusEx (ctypes)          no admin
   CPU load  GetSystemTimes (ctypes)                no admin
-  GPU       nvidia-smi, else LibreHardwareMonitor  NVIDIA / AMD+Intel
+  GPU       nvidia-smi and LibreHardwareMonitor    every card, NVIDIA first
   CPU temp  LibreHardwareMonitor's web server      needs LHM running elevated
 
 Everything except CPU temp works without LibreHardwareMonitor; that field
@@ -358,7 +358,13 @@ def _num(text):
     return float(m.group(1).replace(",", ".")) if m else None
 
 
-def read_gpu():
+def read_gpus():
+    """Every NVIDIA card nvidia-smi can see, in its bus order.
+
+    One line of CSV per GPU, so an SLI pair or a second card for encoding both
+    turn up here. Empty list when nvidia-smi is absent - that is the AMD and
+    Intel case, and LibreHardwareMonitor covers it.
+    """
     try:
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=" + _GPU_FIELDS,
@@ -367,24 +373,30 @@ def read_gpu():
             creationflags=_NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
-        return None
+        return []
     if out.returncode != 0 or not out.stdout.strip():
-        return None
+        return []
 
-    parts = [p.strip() for p in out.stdout.strip().splitlines()[0].split(",")]
-    if len(parts) < 7:
-        return None
-
-    used, total = _num(parts[3]), _num(parts[4])
-    return {
-        "name": parts[0],
-        "temp_c": _num(parts[1]),
-        "load": _num(parts[2]),
-        "vram_used_gb": round(used / 1024, 2) if used is not None else None,
-        "vram_total_gb": round(total / 1024, 2) if total is not None else None,
-        "power_w": _num(parts[5]),
-        "fan": _num(parts[6]),
-    }
+    gpus = []
+    for line in out.stdout.strip().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 7:
+            continue
+        used, total = _num(parts[3]), _num(parts[4])
+        gpus.append({
+            "name": parts[0],
+            "temp_c": _num(parts[1]),
+            "load": _num(parts[2]),
+            "vram_used_gb": round(used / 1024, 2) if used is not None else None,
+            "vram_total_gb": round(total / 1024, 2) if total is not None else None,
+            "power_w": _num(parts[5]),
+            "fan": _num(parts[6]),
+            "fan_unit": "%",
+            "junction_c": None,
+            "hotspot_c": None,
+            "source": "nvidia-smi",
+        })
+    return gpus
 
 
 # ---------------------------------------------------------------------------
@@ -504,12 +516,13 @@ def _looks_like_gpu(groups):
             ("gpu memory total" in groups.get("data", {})))
 
 
-_lhm_gpu_logged = False
+# Names already dumped to the log. Per name, not a single flag: on a dual-GPU
+# box the second card is the one we have not seen before.
+_lhm_gpu_logged = set()
 
 
 def _lhm_gpu_dict(name, groups):
     """Map LHM's sensor labels onto the shape nvidia-smi produces."""
-    global _lhm_gpu_logged
     temps = groups.get("temperatures", {})
     loads = groups.get("load", {})
     powers = groups.get("powers", {})
@@ -523,10 +536,10 @@ def _lhm_gpu_dict(name, groups):
         fan = _first(fans, ("gpu fan 1", "gpu fan", "fan"))
         fan_unit = "RPM"
 
-    if not _lhm_gpu_logged:
+    if name not in _lhm_gpu_logged:
         # One-time dump so a user on a card we could not test can report the
         # exact labels LHM produced - vendor and driver naming varies.
-        _lhm_gpu_logged = True
+        _lhm_gpu_logged.add(name)
         flat = []
         for gname in sorted(groups):
             for label in sorted(groups[gname]):
@@ -548,39 +561,38 @@ def _lhm_gpu_dict(name, groups):
     }
 
 
-def _lhm_gpu_from_tree(tree):
-    """The discrete GPU, or None.
+def _lhm_gpus_from_tree(tree):
+    """Every GPU LHM can see, most VRAM first.
 
-    Prefers the card with the most VRAM, so a laptop's integrated GPU loses to
-    its discrete one.
+    Ordering by VRAM rather than by tree position keeps the discrete card ahead
+    of a laptop's integrated one, which is what the old single-GPU code did and
+    still the right default when there are several: the big card is the one the
+    dashboard should lead with.
     """
-    best = None
-    best_vram = -1.0
+    found = []
     for computer in tree.get("Children") or ():
         for device in computer.get("Children") or ():
             groups = _device_groups(device)
             if not _looks_like_gpu(groups):
                 continue
             total = _lhm_gb(_first(groups.get("data", {}), ("gpu memory total",)))
-            weight = total if total is not None else 0.0
-            if weight > best_vram:
-                best_vram = weight
-                best = (device.get("Text") or "GPU", groups)
-    if best is None:
-        return None
-    return _lhm_gpu_dict(best[0], best[1])
+            found.append((total if total is not None else 0.0,
+                          device.get("Text") or "GPU", groups))
+    # Stable, so two identical cards keep the order LHM listed them in.
+    found.sort(key=lambda item: -item[0])
+    return [_lhm_gpu_dict(name, groups) for _, name, groups in found]
 
 
 def read_lhm():
     """Everything worth having from LibreHardwareMonitor, in one fetch.
 
     Returns {"cpu_temp": C or None, "gpu_junction": C or None,
-    "gpu": dict or None}. When LHM is absent this must fail fast, or one dead
+    "gpus": [dict]}. When LHM is absent this must fail fast, or one dead
     sensor drags the whole poll loop below its 1 Hz budget.
     """
     global _lhm_quiet_until
 
-    empty = {"cpu_temp": None, "gpu_junction": None, "gpu": None}
+    empty = {"cpu_temp": None, "gpu_junction": None, "gpus": []}
 
     now = time.monotonic()
     if now < _lhm_quiet_until:
@@ -620,8 +632,69 @@ def read_lhm():
     return {
         "cpu_temp": first_of(_TEMP_LABELS),
         "gpu_junction": first_of(_JUNCTION_LABELS),
-        "gpu": _lhm_gpu_from_tree(tree),
+        "gpus": _lhm_gpus_from_tree(tree),
     }
+
+
+# ---- one list, one entry per physical card ----------------------------------
+
+
+def _gpu_key(name):
+    """Loose identity for a card, so nvidia-smi and LHM naming can be matched."""
+    text = (name or "").lower()
+    for noise in ("nvidia", "(r)", "(tm)"):
+        text = text.replace(noise, " ")
+    return re.sub(r"[^a-z0-9]+", "", text)
+
+
+def merge_gpus(nvidia, lhm_gpus, junction_fallback=None):
+    """Every GPU in the machine, biggest card first, nvidia-smi preferred.
+
+    nvidia-smi needs no admin and no LHM, so it stays the source for NVIDIA
+    cards; LHM is the only source for AMD and Intel, and the only source of the
+    memory junction on any card. A card BOTH can see has to produce one entry,
+    not two, so each LHM reading claims at most one nvidia-smi card of the same
+    name - per entry, which is what stops two identical cards collapsing into
+    one while still merging each of them.
+    """
+    merged = [dict(gpu) for gpu in nvidia]
+    claimed = set()
+
+    for extra in lhm_gpus:
+        key = _gpu_key(extra.get("name"))
+        match = None
+        for i, gpu in enumerate(merged):
+            if i not in claimed and _gpu_key(gpu.get("name")) == key:
+                match = i
+                break
+        if match is None:
+            merged.append(dict(extra))
+            continue
+        claimed.add(match)
+        target = merged[match]
+        for field in ("temp_c", "junction_c", "hotspot_c", "load",
+                      "vram_used_gb", "vram_total_gb", "power_w"):
+            if target.get(field) is None and extra.get(field) is not None:
+                target[field] = extra[field]
+        if target.get("fan") is None and extra.get("fan") is not None:
+            # The unit travels with the reading: LHM may only have RPM where
+            # nvidia-smi would have reported a percentage.
+            target["fan"] = extra["fan"]
+            target["fan_unit"] = extra.get("fan_unit") or "%"
+
+    # Discrete ahead of integrated, so card 1 is the one worth looking at.
+    # Stable, so two identical cards keep their bus order.
+    merged.sort(key=lambda gpu: -(gpu.get("vram_total_gb") or 0.0))
+
+    # The tree-wide junction scan cannot tell which card it read, so it may
+    # only be trusted for the leading one - and only when nothing better came
+    # from that card's own sensors.
+    if merged and merged[0].get("junction_c") is None:
+        merged[0]["junction_c"] = junction_fallback
+
+    for i, gpu in enumerate(merged):
+        gpu["slot"] = i
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -664,17 +737,77 @@ ROW_LABELS = {
 }
 
 
+# A machine can hold more than one GPU - a discrete card plus the CPU's
+# integrated one is the common case, two discrete cards the interesting one.
+# Each gets a card of its own with an id of its own, so the layout can hide and
+# reorder them independently. The first keeps the bare "gpu" id, so a state.json
+# written by an older version still means exactly what it meant.
+MAX_GPU_CARDS = 4
+GPU_DROP_GRACE = 90.0    # seconds before believing a GPU has gone away
+_GPU_ID = re.compile(r"^gpu([2-9])?$")
+_gpu_cards = 1           # how many GPU cards exist; set from what we detect
+
+
+def card_kind(cid):
+    """Which rows and labels a card id uses. Every GPU card shares the GPU's."""
+    return "gpu" if _GPU_ID.match(cid or "") else cid
+
+
+def gpu_slot(cid):
+    """1 for "gpu", 2 for "gpu2"... 0 for anything that is not a GPU card."""
+    m = _GPU_ID.match(cid or "")
+    return int(m.group(1) or 1) if m else 0
+
+
+def gpu_card_ids():
+    return ["gpu"] + ["gpu" + str(n) for n in range(2, _gpu_cards + 1)]
+
+
+def card_ids():
+    """Every card id that currently exists, in default order."""
+    out = []
+    for cid in CARD_ORDER:
+        out.extend(gpu_card_ids() if cid == "gpu" else [cid])
+    return out
+
+
+def default_card_ids():
+    """The cards a fresh install shows: one GPU, whatever the machine holds.
+
+    A second GPU is usually an onboard chip nobody wants a card for, so the
+    extra cards are offered rather than imposed - they exist in card_ids(), so
+    the Layout menu lists them and a tick brings them in, but the default
+    dashboard is the same three cards it always was.
+    """
+    return [cid for cid in card_ids() if gpu_slot(cid) < 2]
+
+
+def card_label(cid):
+    """Just "GPU" on its own, but "GPU 1" and "GPU 2" once there are two.
+
+    This is the menu label: the Layout menus have to tell the cards apart even
+    when only one of them is shown. The heading ON the card is the page's call,
+    and it only numbers itself once two cards are actually on screen.
+    """
+    kind = card_kind(cid)
+    if kind == "gpu" and _gpu_cards > 1:
+        return "GPU " + str(gpu_slot(cid))
+    return CARD_LABELS[kind]
+
+
 def layout_schema():
     """Labels and ids for the tray menu, so they live in one place."""
     return [
-        {"id": cid, "label": CARD_LABELS[cid],
-         "rows": [{"id": r, "label": ROW_LABELS[cid][r]} for r in ROW_IDS[cid]]}
-        for cid in CARD_ORDER
+        {"id": cid, "label": card_label(cid),
+         "rows": [{"id": r, "label": ROW_LABELS[card_kind(cid)][r]}
+                  for r in ROW_IDS[card_kind(cid)]]}
+        for cid in card_ids()
     ]
 
 
 def default_layout():
-    return [{"id": cid, "rows": list(ROW_IDS[cid])} for cid in CARD_ORDER]
+    return [{"id": cid, "rows": list(ROW_IDS[card_kind(cid)])}
+            for cid in default_card_ids()]
 
 
 _ui = {"wallpaper": {"mode": "shader"}, "zoom": 1.0, "disk": "", "sources": [],
@@ -686,20 +819,22 @@ def _clean_layout(raw):
     """Accept only known cards/rows, in a canonical row order. None if unusable."""
     if not isinstance(raw, list):
         return None
+    known = card_ids()
     seen = set()
     out = []
     for entry in raw:
         if not isinstance(entry, dict):
             continue
         cid = entry.get("id")
-        if cid not in ROW_IDS or cid in seen:
+        if cid not in known or cid in seen:
             continue
         seen.add(cid)
+        all_rows = ROW_IDS[card_kind(cid)]
         rows = entry.get("rows")
         if not isinstance(rows, list):
-            rows = list(ROW_IDS[cid])
+            rows = list(all_rows)
         # Canonical order, unknown ids dropped: the page can rely on this.
-        out.append({"id": cid, "rows": [r for r in ROW_IDS[cid] if r in rows]})
+        out.append({"id": cid, "rows": [r for r in all_rows if r in rows]})
     return out
 
 
@@ -712,7 +847,7 @@ def _save_locked():
 
 
 def load_state():
-    global _ui
+    global _ui, _gpu_cards
     try:
         with open(STATE_PATH, encoding="utf-8") as fh:
             saved = json.load(fh)
@@ -736,6 +871,15 @@ def load_state():
         pass
     if isinstance(saved.get("disk"), str):
         _ui["disk"] = saved["disk"]
+
+    # Take the saved layout's word for how many GPU cards there are, or its
+    # entries for the second card would be dropped as unknown before the first
+    # reading has come in. If that GPU is genuinely gone, sync_gpu_cards()
+    # removes the card once it is sure.
+    for entry in saved.get("layout") or []:
+        if isinstance(entry, dict):
+            _gpu_cards = max(_gpu_cards, min(gpu_slot(entry.get("id")),
+                                             MAX_GPU_CARDS))
     lay = _clean_layout(saved.get("layout"))
     if lay:                       # never let a saved layout hide every card
         _ui["layout"] = lay
@@ -761,6 +905,48 @@ def set_layout(raw):
         _ui["layout"] = clean
         _save_locked()
     return get_layout()
+
+
+_gpu_gone_since = 0.0
+
+
+def sync_gpu_cards(count):
+    """Match the GPU cards on OFFER to the GPUs actually found.
+
+    Called from the poll loop, so a GPU that turns up - or a driver that finally
+    reports one - can be shown without a restart. It only makes the card
+    available: nothing is added to the layout, because a second GPU is often an
+    onboard chip nobody wants a card for. Ticking "GPU 2" in the Layout menu is
+    what puts it on screen.
+
+    A GPU that DISAPPEARS is only believed after a grace period, and then its
+    card is dropped from the layout: LibreHardwareMonitor is often still
+    starting when we take our first reading, and a GPU only it can see would
+    otherwise flicker in and out in the first few seconds.
+    """
+    global _gpu_cards, _gpu_gone_since
+
+    count = max(1, min(int(count or 1), MAX_GPU_CARDS))
+    now = time.monotonic()
+
+    if count < _gpu_cards:
+        if _gpu_gone_since == 0.0:
+            _gpu_gone_since = now
+        if now - _gpu_gone_since < GPU_DROP_GRACE:
+            return
+    _gpu_gone_since = 0.0
+    if count == _gpu_cards:
+        return
+
+    with _ui_lock:
+        _gpu_cards = count
+        wanted = gpu_card_ids()
+        kept = [c for c in _ui["layout"]
+                if card_kind(c["id"]) != "gpu" or c["id"] in wanted]
+        if len(kept) == len(_ui["layout"]):
+            return                # cards gained, nothing to drop: offer only
+        _ui["layout"] = kept
+        _save_locked()
 
 
 def get_wallpaper():
@@ -881,15 +1067,8 @@ CPU_NAME = detect_cpu_name()
 def poll_once():
     lhm = read_lhm()
     cpu_temp = lhm.get("cpu_temp")
-    # nvidia-smi first: it needs no admin and no LHM, so NVIDIA users are
-    # unaffected. If it is absent (AMD, Intel, or NVIDIA without the driver
-    # CLI), fall back to the GPU LHM reported.
-    gpu = read_gpu()
-    if gpu is None:
-        gpu = lhm.get("gpu")
-    if gpu is not None and gpu.get("junction_c") is None:
-        # nvidia-smi does not expose the memory junction; LHM does.
-        gpu["junction_c"] = lhm.get("gpu_junction")
+    gpus = merge_gpus(read_gpus(), lhm.get("gpus") or [], lhm.get("gpu_junction"))
+    sync_gpu_cards(len(gpus))
     return {
         "ok": True,
         "time": time.time(),
@@ -900,7 +1079,10 @@ def poll_once():
             "temp_c": cpu_temp,
             "threads": os.cpu_count(),
         },
-        "gpu": gpu,
+        # "gpu" is the leading card, kept so an older cached page still paints
+        # something; "gpus" is the real answer and what the dashboard reads.
+        "gpu": gpus[0] if gpus else None,
+        "gpus": gpus,
         "ram": read_ram(),
         "disk": read_disk(),
         "disks": read_all_disks(),
@@ -1316,7 +1498,7 @@ def main():
         snap = dict(_state)
 
     cpu = snap.get("cpu") or {}
-    gpu = snap.get("gpu")
+    gpus = snap.get("gpus") or []
     if cpu.get("temp_c") is not None:
         temp_status = "LibreHardwareMonitor OK"
     else:
@@ -1325,8 +1507,14 @@ def main():
     print()
     print("  CPU   " + CPU_NAME)
     print("  temp  " + temp_status)
-    print("  GPU   " + (gpu["name"] if gpu
-                        else "no GPU found (needs nvidia-smi or LibreHardwareMonitor)"))
+    if gpus:
+        for i, gpu in enumerate(gpus):
+            label = "GPU " + str(i + 1) if len(gpus) > 1 else "GPU  "
+            print("  " + label + " " + gpu["name"] +
+                  "  (" + (gpu.get("source") or "lhm") + ")")
+    else:
+        print("  GPU   no GPU found "
+              "(needs nvidia-smi or LibreHardwareMonitor)")
     print()
     print("  Open on the iPad:  http://" + local_ip() + ":" + str(PORT) + "/")
     print("  Ctrl+C to stop.")

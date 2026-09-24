@@ -138,14 +138,22 @@ window.Wallpaper = (function () {
       stencil: false, powerPreference: 'low-power'
     });
     if (!gl) {
+      // Says so rather than just going dark. An old Android tablet has no
+      // console anyone can reach, and "the wallpaper does not work" is a very
+      // different problem from "this browser has no WebGL" - one of them is
+      // fixable and the other is the device. A still picture still works.
       document.body.style.background =
         'radial-gradient(ellipse at 30% 20%, #1b2352, #05070d 70%)';
+      onStatus('no WebGL on this browser - pick a picture or video instead');
       return false;
     }
 
     var vs = compile(gl.VERTEX_SHADER, VERTEX_SRC);
     var fs = compile(gl.FRAGMENT_SHADER, FRAGMENT_SRC);
-    if (!vs || !fs) return false;
+    if (!vs || !fs) {
+      onStatus('this browser could not compile the shader - pick a picture instead');
+      return false;
+    }
 
     prog = gl.createProgram();
     gl.attachShader(prog, vs);

@@ -62,12 +62,15 @@ html, body {
   -webkit-touch-callout: none;
 }
 
+/* Longhand offsets rather than `inset`, here and in the three rules below:
+   `inset` is Chrome 87, and one of the devices on this dashboard is an Android
+   tablet on Chrome 85. It is the same declaration, and it costs three words. */
 #wallpaper,
 #wallpaper-video,
 #wallpaper-image,
 #wallpaper-web {
   position: fixed;
-  inset: 0;
+  top: 0; right: 0; bottom: 0; left: 0;
   width: 100%;
   height: 100%;
   display: block;
@@ -87,7 +90,7 @@ html, body {
 /* Darkens the edges so white text stays legible over a bright shader frame. */
 .vignette {
   position: fixed;
-  inset: 0;
+  top: 0; right: 0; bottom: 0; left: 0;
   z-index: 1;
   pointer-events: none;
   background:
@@ -265,6 +268,15 @@ html, body {
   grid-template-rows: repeat(8, 1fr);
   grid-auto-flow: column;   /* fill top-to-bottom, then the next column */
   gap: 2px;
+}
+
+/* Chrome 85 and Safari 14 have no aspect-ratio, and these two boxes get their
+   whole height from it - the square collapses to a 14px strip and the picker
+   tiles to a hairline. Height from the same expression the width uses, applied
+   only where aspect-ratio is missing so nothing changes on a modern browser. */
+@supports not (aspect-ratio: 1 / 1) {
+  .cores { height: calc(var(--fs-value) * 1.12); }
+  .tile  { height: 94px; }        /* 16:10 of the 150px minimum column */
 }
 
 .cores:empty { display: none; }   /* no per-core data -> no empty square */
@@ -501,7 +513,7 @@ body.is-idle .bar-right .zoom {
 
 .picker {
   position: fixed;
-  inset: 0;
+  top: 0; right: 0; bottom: 0; left: 0;
   z-index: 10;
   background: rgba(3, 5, 10, 0.72);
   -webkit-backdrop-filter: blur(18px);
@@ -729,7 +741,7 @@ body.is-idle .bar-right .zoom {
 
 .tile-reason {
   position: absolute;
-  inset: 0;
+  top: 0; right: 0; bottom: 0; left: 0;
   display: flex;
   align-items: center;
   justify-content: center;

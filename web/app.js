@@ -204,6 +204,113 @@
     }
   }
 
+  // ---- GPU cards ----------------------------------------------------------
+
+  // A machine can hold more than one GPU, so the page holds as many GPU cards
+  // as the server reports GPUs. The markup ships with one; the others are
+  // clones of it with every id inside suffixed by the card id, so each card's
+  // rows can still be found by id and card 1 keeps the ids it always had.
+  var MAX_GPU_CARDS = 4;
+  var gpuIds = ['gpu'];
+
+  function isGpu(id) { return /^gpu[2-9]?$/.test(id); }
+
+  function kindOf(id) { return isGpu(id) ? 'gpu' : id; }
+
+  function gel(cardId, base) {
+    return $(cardId === 'gpu' ? base : base + '-' + cardId);
+  }
+
+  // Two labels, deliberately. The Layout editor has to tell the cards apart
+  // even when only one of them is shown, so it numbers them as soon as there
+  // are two GPUs. The heading on the card numbers itself only when two cards
+  // are actually on screen - with one card there is nothing to distinguish it
+  // from, and "GPU 1" beside no GPU 2 just raises a question.
+  function gpuLabel(cardId) {
+    if (gpuIds.length < 2) return 'GPU';
+    return 'GPU ' + (gpuIds.indexOf(cardId) + 1);
+  }
+
+  function gpuHeading(cardId) {
+    var shown = layoutState.filter(function (c) { return isGpu(c.id); });
+    if (shown.length < 2) return 'GPU';
+    return 'GPU ' + (gpuIds.indexOf(cardId) + 1);
+  }
+
+  function refreshGpuHeadings() {
+    gpuIds.forEach(function (id) {
+      var card = $('card-' + id);
+      var head = card && card.querySelector('h2');
+      if (head) setText(head, gpuHeading(id));
+    });
+  }
+
+  function ensureGpuCards(count) {
+    count = Math.max(1, Math.min(count || 1, MAX_GPU_CARDS));
+    if (count === gpuIds.length) return;
+
+    var first = $('card-gpu');
+    if (!first) return;
+
+    while (gpuIds.length > count) {
+      var dead = $('card-' + gpuIds.pop());
+      if (dead && dead.parentNode) dead.parentNode.removeChild(dead);
+    }
+    while (gpuIds.length < count) {
+      var id = 'gpu' + (gpuIds.length + 1);
+      var clone = first.cloneNode(true);
+      clone.id = 'card-' + id;
+      clone.setAttribute('data-card', id);
+      // Suffix every id inside, or the clone would answer to card 1's ids and
+      // both cards would paint the same numbers.
+      var kids = clone.querySelectorAll('[id]');
+      for (var i = 0; i < kids.length; i++) {
+        kids[i].id = kids[i].id + '-' + id;
+      }
+      first.parentNode.appendChild(clone);
+      gpuIds.push(id);
+    }
+
+    // The card set changed without the layout changing, so the grid template
+    // and the headings have to be rebuilt by hand - applyLayout() alone only
+    // runs when the key changes.
+    applyLayout(layoutState);
+  }
+
+  function paintGpu(cardId, gpu, missing) {
+    if (!$('card-' + cardId)) return;
+    if (!gpu) {
+      setText(gel(cardId, 'gpu-name'), missing);
+      return;
+    }
+    setText(gel(cardId, 'gpu-name'), gpu.name || ' ');
+    setValue(gel(cardId, 'gpu-temp'), gpu.temp_c, GPU_HEAT, 0, 3);
+    setNum(gel(cardId, 'gpu-load-text'), padTo(fmt(gpu.load, 0) + '%', 4));
+    setBar(gel(cardId, 'gpu-load-bar'), gpu.load);
+
+    var vramPct = null;
+    if (gpu.vram_used_gb !== null && gpu.vram_total_gb) {
+      vramPct = 100 * gpu.vram_used_gb / gpu.vram_total_gb;
+    }
+    setNum(gel(cardId, 'vram-text'), padTo(fmt(gpu.vram_used_gb, 1), 4) +
+           ' / ' + fmt(gpu.vram_total_gb, 1) + ' GB');
+    setBar(gel(cardId, 'vram-bar'), vramPct);
+    setNum(gel(cardId, 'gpu-power'), padTo(fmt(gpu.power_w, 0), 3));
+    setNum(gel(cardId, 'gpu-fan'), padTo(fmt(gpu.fan, 0), 3));
+    setText(gel(cardId, 'gpu-fan-unit'), gpu.fan_unit === 'RPM' ? 'RPM' : '% fan');
+
+    // AMD reports a GPU hot spot where NVIDIA reports a memory junction;
+    // show whichever exists and label it accordingly.
+    var junction = (gpu.junction_c === null || gpu.junction_c === undefined)
+      ? null : gpu.junction_c;
+    var hotspot = (gpu.hotspot_c === null || gpu.hotspot_c === undefined)
+      ? null : gpu.hotspot_c;
+    setNum(gel(cardId, 'gpu-junction'),
+           padTo(fmt(junction !== null ? junction : hotspot, 0), 3));
+    setText(gel(cardId, 'gpu-junction-unit'),
+            (junction === null && hotspot !== null) ? 'hot spot' : 'junction');
+  }
+
   // ---- painting -----------------------------------------------------------
 
   function paint(data) {
@@ -250,6 +357,12 @@
       markActive(data.wallpaper);
     }
 
+    // Before the layout, which addresses the GPU cards by id and therefore
+    // needs them to exist. An older server sends one GPU and no list.
+    var gpus = data.gpus;
+    if (!gpus) gpus = data.gpu ? [data.gpu] : [];
+    ensureGpuCards(gpus.length);
+
     // ...and the layout. Only re-applied when it actually changed, so the 1 Hz
     // poll does not rebuild the grid every second.
     if (Array.isArray(data.layout)) {
@@ -270,36 +383,12 @@
       : '';
     showHint();
 
-    var gpu = data.gpu;
-    if (gpu) {
-      setText($('gpu-name'), gpu.name || ' ');
-      setValue($('gpu-temp'), gpu.temp_c, GPU_HEAT, 0, 3);
-      setNum($('gpu-load-text'), padTo(fmt(gpu.load, 0) + '%', 4));
-      setBar($('gpu-load-bar'), gpu.load);
-
-      var vramPct = null;
-      if (gpu.vram_used_gb !== null && gpu.vram_total_gb) {
-        vramPct = 100 * gpu.vram_used_gb / gpu.vram_total_gb;
-      }
-      setNum($('vram-text'), padTo(fmt(gpu.vram_used_gb, 1), 4) + ' / ' + fmt(gpu.vram_total_gb, 1) + ' GB');
-      setBar($('vram-bar'), vramPct);
-      setNum($('gpu-power'), padTo(fmt(gpu.power_w, 0), 3));
-      setNum($('gpu-fan'), padTo(fmt(gpu.fan, 0), 3));
-      setText($('gpu-fan-unit'), gpu.fan_unit === 'RPM' ? 'RPM' : '% fan');
-
-      // AMD reports a GPU hot spot where NVIDIA reports a memory junction;
-      // show whichever exists and label it accordingly.
-      var junction = (gpu.junction_c === null || gpu.junction_c === undefined)
-        ? null : gpu.junction_c;
-      var hotspot = (gpu.hotspot_c === null || gpu.hotspot_c === undefined)
-        ? null : gpu.hotspot_c;
-      setNum($('gpu-junction'),
-             padTo(fmt(junction !== null ? junction : hotspot, 0), 3));
-      setText($('gpu-junction-unit'),
-              (junction === null && hotspot !== null) ? 'hot spot' : 'junction');
-    } else {
-      setText($('gpu-name'), 'nvidia-smi unavailable');
-    }
+    // One card per GPU. A card with nothing behind it says so rather than
+    // holding the last card's numbers.
+    gpuIds.forEach(function (id, i) {
+      paintGpu(id, gpus[i],
+               gpus.length ? 'not detected' : 'needs nvidia-smi or LHM');
+    });
 
     var ram = data.ram;
     if (ram) {
@@ -1021,10 +1110,12 @@
   // fractions - never auto rows. A hidden card is display:none and therefore
   // not a grid item at all; that is why the column count and the portrait row
   // fractions are rebuilt here rather than left to CSS.
-  var CARD_IDS = ['cpu', 'gpu', 'ram'];
+  // Every GPU card shares the GPU's rows, weight and labels, so these stay
+  // keyed by KIND while the ids themselves depend on how many GPUs there are.
   var CARD_LABEL = { cpu: 'CPU', gpu: 'GPU', ram: 'Memory' };
   // Portrait row weights: the GPU card carries more rows, so it gets more room.
   var CARD_WEIGHT = { cpu: 0.78, gpu: 1.15, ram: 1.07 };
+
   var ROW_IDS = {
     cpu: ['temp', 'load', 'cores'],
     gpu: ['temp', 'load', 'vram', 'chips'],
@@ -1037,15 +1128,25 @@
     ram: { temp: 'Temperature', load: 'In-use meter', free: 'Free GB',
            drives: 'Drive chips' }
   };
-  var DEFAULT_LAYOUT = [
-    { id: 'cpu', rows: ROW_IDS.cpu.slice() },
-    { id: 'gpu', rows: ROW_IDS.gpu.slice() },
-    { id: 'ram', rows: ROW_IDS.ram.slice() }
-  ];
 
-  var layoutState = DEFAULT_LAYOUT.map(function (c) {
-    return { id: c.id, rows: c.rows.slice() };
-  });
+  function cardIds() {
+    return ['cpu'].concat(gpuIds, ['ram']);
+  }
+
+  function cardLabel(id) {
+    return isGpu(id) ? gpuLabel(id) : (CARD_LABEL[id] || id);
+  }
+
+  function rowIds(id) {
+    return ROW_IDS[kindOf(id)] || [];
+  }
+  function defaultLayout() {
+    return cardIds().map(function (id) {
+      return { id: id, rows: rowIds(id).slice() };
+    });
+  }
+
+  var layoutState = defaultLayout();
   var lastLayoutKey = '';
 
   function layoutKey(layout) {
@@ -1072,7 +1173,7 @@
     if (window.matchMedia('(max-aspect-ratio: 1/1)').matches) {
       cards.style.gridTemplateColumns = 'minmax(0, 1fr)';
       cards.style.gridTemplateRows = visible.map(function (id) {
-        return 'minmax(0, ' + (CARD_WEIGHT[id] || 1) + 'fr)';
+        return 'minmax(0, ' + (CARD_WEIGHT[kindOf(id)] || 1) + 'fr)';
       }).join(' ');
       cards.style.gridAutoRows = '0';
     } else {
@@ -1097,17 +1198,18 @@
       if (!card) return;
       card.hidden = false;
       card.style.order = String(i);
-      ROW_IDS[c.id].forEach(function (row) {
+      rowIds(c.id).forEach(function (row) {
         var el = card.querySelector('[data-row="' + row + '"]');
         if (el) el.hidden = c.rows.indexOf(row) === -1;
       });
     });
-    CARD_IDS.forEach(function (id) {
+    cardIds().forEach(function (id) {
       if (present[id]) return;
       var card = $('card-' + id);
       if (card) card.hidden = true;
     });
 
+    refreshGpuHeadings();
     fitGrid();
   }
 
@@ -1144,7 +1246,17 @@
 
   function showCard(id) {
     if (indexOfCard(id) >= 0) return;
-    layoutState.push({ id: id, rows: ROW_IDS[id].slice() });
+    // A GPU card comes back beside the other GPU cards rather than after the
+    // memory card: that is where it was, and where it is expected.
+    var at = -1;
+    if (isGpu(id)) {
+      layoutState.forEach(function (c, i) {
+        if (isGpu(c.id)) at = i + 1;
+      });
+    }
+    var entry = { id: id, rows: rowIds(id).slice() };
+    if (at < 0) layoutState.push(entry);
+    else layoutState.splice(at, 0, entry);
     saveLayout();
   }
 
@@ -1155,7 +1267,7 @@
     var k = rows.indexOf(row);
     if (k >= 0) rows.splice(k, 1); else rows.push(row);
     // Keep the canonical order so the page matches what the server stores.
-    layoutState[i].rows = ROW_IDS[id].filter(function (r) {
+    layoutState[i].rows = rowIds(id).filter(function (r) {
       return rows.indexOf(r) !== -1;
     });
     saveLayout();
@@ -1190,7 +1302,7 @@
       down.disabled = idx === layoutState.length - 1;
       var name = document.createElement('span');
       name.className = 'lname';
-      name.textContent = CARD_LABEL[card.id] || card.id;
+      name.textContent = cardLabel(card.id);
       var vis = lbtn('\u2713', 'Hide this card', function () { hideCard(card.id); });
       vis.setAttribute('aria-pressed', 'true');
       vis.disabled = layoutState.length <= 1;
@@ -1200,7 +1312,7 @@
       head.appendChild(vis);
       group.appendChild(head);
 
-      ROW_IDS[card.id].forEach(function (row) {
+      rowIds(card.id).forEach(function (row) {
         var on = card.rows.indexOf(row) !== -1;
         var btn = document.createElement('button');
         btn.type = 'button';
@@ -1210,7 +1322,7 @@
         box.className = 'box';
         box.textContent = '\u2713';
         var label = document.createElement('span');
-        label.textContent = (ROW_LABEL[card.id] || {})[row] || row;
+        label.textContent = (ROW_LABEL[kindOf(card.id)] || {})[row] || row;
         btn.appendChild(box);
         btn.appendChild(label);
         btn.addEventListener('click', function () { toggleRow(card.id, row); });
@@ -1222,7 +1334,7 @@
 
     // Cards that are currently hidden get their own group, so they can be
     // brought back without touching the tray.
-    var hidden = CARD_IDS.filter(function (id) { return !present[id]; });
+    var hidden = cardIds().filter(function (id) { return !present[id]; });
     if (hidden.length) {
       var group = document.createElement('div');
       group.className = 'lgroup';
@@ -1241,7 +1353,7 @@
         var box = document.createElement('span');
         box.className = 'box';
         var label = document.createElement('span');
-        label.textContent = CARD_LABEL[id] || id;
+        label.textContent = cardLabel(id);
         btn.appendChild(box);
         btn.appendChild(label);
         btn.addEventListener('click', function () { showCard(id); });
@@ -1265,9 +1377,7 @@
   });
 
   $('layout-reset').addEventListener('click', function () {
-    layoutState = DEFAULT_LAYOUT.map(function (c) {
-      return { id: c.id, rows: c.rows.slice() };
-    });
+    layoutState = defaultLayout();
     saveLayout();
   });
 
