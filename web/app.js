@@ -440,6 +440,7 @@
   function selectWallpaper(choice) {
     // Applied here straight away so the tap feels instant, then told to the
     // server, which is what other viewers pick up on their next poll.
+    Wallpaper.retry(choice);
     Wallpaper.apply(choice);
     markActive(choice);
     var q = '?mode=' + encodeURIComponent(choice.mode) +
@@ -448,11 +449,12 @@
     fetch('/api/wallpaper/select' + q, { cache: 'no-store' }).catch(function () {});
   }
 
-  function tile(choice, label, badge, imgSrc, active) {
+  function tile(choice, label, badge, imgSrc, active, reason) {
     var el = document.createElement('button');
     el.type = 'button';
     el.className = 'tile' + (active ? ' is-active' : '') +
-                   (imgSrc ? '' : ' tile-shader');
+                   (imgSrc ? '' : ' tile-shader') +
+                   (reason ? ' is-blocked' : '');
     if (imgSrc) {
       var img = document.createElement('img');
       img.loading = 'lazy';
@@ -474,6 +476,15 @@
       n.textContent = label;
       el.appendChild(n);
     }
+    if (reason) {
+      el.disabled = true;
+      el.title = reason;
+      var r = document.createElement('span');
+      r.className = 'tile-reason';
+      r.textContent = reason;
+      el.appendChild(r);
+      return el;
+    }
     el._choice = choice;
     el.addEventListener('click', function () { selectWallpaper(choice); });
     return el;
@@ -492,29 +503,33 @@
           active.mode === 'shader'
         ));
 
-        var items = (data.items || []).filter(function (i) { return i.supported; });
-        items.forEach(function (i) {
+        // Unusable ones are drawn too, greyed out and captioned. Filtering
+        // them out made a rejected wallpaper look like one that was never
+        // scanned at all, which is the harder problem to diagnose.
+        var all = data.items || [];
+        var usable = 0;
+        all.forEach(function (i) {
+          if (i.supported) usable++;
           var choice = { mode: i.type, id: i.id, title: i.title };
           grid.appendChild(tile(
-            choice, i.title, i.type,
+            choice, i.title,
+            (i.source === 'local' ? 'local ' : '') + (i.type || 'unknown'),
             i.preview ? '/media/' + i.id + '/preview' : null,
-            active.mode === i.type && active.id === i.id
+            i.supported && active.mode === i.type && active.id === i.id,
+            i.supported ? '' : (i.reason || 'Cannot be used here')
           ));
         });
 
-        var total = (data.items || []).length;
         var build = $('build') ? $('build').textContent : '?';
         setText($('pick-count'),
-                items.length + ' of ' + total + ' usable  ·  build ' + build);
+                usable + ' of ' + all.length + ' usable  ·  build ' + build);
 
-        var skipped = total - items.length;
-        var note = '';
-        if (skipped > 0) {
-          note = skipped + ' scene or application wallpapers cannot be used - ' +
-                 'only Wallpaper Engine itself can render those.';
-        }
+        var note = 'Your own pictures and videos go in ' +
+                   (data.local_dir || 'the wallpapers folder beside the app') +
+                   ' - .jpg .png .gif .webp .mp4 .webm, or a folder holding one.';
         if (!data.ffmpeg) {
-          note += ' ffmpeg was not found, so video wallpapers cannot be prepared.';
+          note += ' ffmpeg was not found, so videos cannot be prepared; ' +
+                  'pictures still work.';
         }
         setText($('pick-note'), note);
       })

@@ -322,6 +322,56 @@ as the guaranteed escape hatch.
 
 ---
 
+## v1.2: the local wallpaper folder, stills, and honest listings
+
+Three things, all in `wallpapers.py`, `server.py` and the picker.
+
+**`wallpapers\` beside the exe is a second library.** No Steam, no Wallpaper
+Engine; copy the folder and the wallpapers travel with it. `local_dir()`
+resolves it, `CASEGAUGE_WALLPAPERS` overrides it, and `server.main()` creates
+it empty on first run so there is somewhere obvious to drop files. Ids are
+`local-<sha1[:8]>-<slug>` from the path relative to the root — they end up in
+`state.json`, so they must survive a restart, and only renaming the file
+changes one.
+
+**A folder is a drawer, not a wallpaper.** `_walk_local()` descends four deep
+and lists every picture and video it finds separately, because someone who
+drops twenty loops in a folder means twenty wallpapers. The two exceptions
+are folders that *are* one wallpaper: a `project.json` (a workshop copy) or an
+`index.html` (a web wallpaper). Titles are prefixed with the containing
+folder, so two files called `loop.mp4` stay tellable apart.
+
+**Stills are a new type.** `image` alongside `video`/`web`, rendered by a new
+`#wallpaper-image` layer. No transcode, no ffmpeg, no prepare/poll round trip
+— the picture is already something Safari can read. Animated GIFs animate.
+This is the only wallpaper type that works with nothing else installed.
+
+**Unusable wallpapers are listed, not hidden.** Every item carries a `reason`
+when `supported` is false, and the picker draws it greyed out and captioned.
+The old behaviour — filter to `supported` — is what sent the user hunting:
+a scene wallpaper they had just downloaded looked identical to one the scan
+had never seen. Diagnosing "it is not in the list" is much harder than reading
+"Scene wallpaper - only Wallpaper Engine can render these" on the tile itself.
+
+Two bugs fell out of building it, both in code that predates it:
+
+- **The picker grid collapsed once it scrolled.** `.tile` sizes itself with
+  `aspect-ratio: 16/10`, but grid rows never derived height from it — the
+  `1fr` columns are not definite when rows are sized, so rows fell back to the
+  tile's *text* height, about 20px. With 21 tiles the leftover space stretched
+  them and it looked fine; at 81 tiles there was none and every tile overlapped
+  the next. Fixed with `grid-auto-rows: max-content` (`max-content` does
+  consult the aspect ratio) plus `align-content: start`. Showing every
+  wallpaper is what first made the list long enough to expose it.
+- **The transcode shortcut mislabelled containers.** Anything at or under
+  `TARGET_HEIGHT` was `shutil.copyfile`d to `<id>.mp4`. Fine while every source
+  was a workshop .mp4; a local `.webm` became an mp4-named webm that Safari
+  refuses. Now the copy needs a `.mp4` source, and anything else is encoded.
+  The same fix stopped small sources being *upscaled* to 768p: the scale filter
+  is dropped entirely when the source is already under the target.
+
+---
+
 ## Not started, but discussed
 
 - **Video wallpaper sharpness.** `TARGET_HEIGHT = 768` in `wallpapers.py` was
@@ -331,6 +381,10 @@ as the guaranteed escape hatch.
   ~180 MB) and everything in `cache/` must be re-transcoded (just delete it).
 - **Sparklines.** A 60-second rolling history per card was offered twice and
   never taken up.
+- **Poster frames for local videos.** A local `.mp4` with no sibling image has
+  no thumbnail, so its tile is a plain gradient with the title on it. One
+  `ffmpeg -frames:v 1` per video, cached beside the transcode, would fix it.
+  Offered, not built.
 - **Extra sensors.** LHM exposes GPU Memory Junction (runs much hotter than GPU
   core and is the number that matters on a 5070 Ti), CCD1, VRM MOS, SSD and
   per-DIMM temperatures. Offered, not built.
@@ -424,6 +478,14 @@ made the canvas look like it had a stale aspect ratio when it did not.
 - **Range requests.** iOS Safari will not play a `<video>` from a server that
   ignores `Range`. `_send_file` implements it; `SimpleHTTPRequestHandler` does
   not.
+- **`wallpapers/` the folder vs `wallpapers.py` the module.** They sit side by
+  side. Python resolves the module file ahead of a directory with no
+  `__init__.py`, so the import is safe — but do not put an `__init__.py` in
+  that folder, and do not rename the module to match it.
+- **NVENC is assumed.** The transcode hardcodes `-hwaccel cuda` and
+  `h264_nvenc`. The local folder makes the app portable to machines without an
+  NVIDIA GPU, where video wallpapers will now fail at the encode step; stills
+  still work. A `libx264` fallback has not been written.
 - **DPI.** `kiosk.ps1` deliberately does **not** call `SetProcessDPIAware`. At
   125% scale a DPI-aware process sees different coordinates than an unaware
   one, and Chromium places windows in whatever space it is handed. Reading and

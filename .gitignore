@@ -19,3 +19,7 @@ PCMonitor.exe
 
 # A re-encoded wallpaper cache can be very large (100+ MB); already covered
 # above by cache/, kept here as a reminder.
+
+# Your own wallpapers. Personal media, frequently hundreds of MB, and the
+# folder is recreated empty on first run.
+wallpapers/

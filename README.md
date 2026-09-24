@@ -36,8 +36,8 @@ less when something is missing.
 | **Windows 10/11** | everything | — |
 | NVIDIA driver (`nvidia-smi`) | the GPU card on NVIDIA | the GPU card reads `--` unless LHM is present |
 | **LibreHardwareMonitor** | CPU temperature, and AMD/Intel GPU readings | CPU temp and any AMD/Intel GPU read `--` |
-| ffmpeg *(optional)* | video wallpapers | video wallpapers can't be prepared |
-| Wallpaper Engine *(optional, paid)* | its wallpapers | only the built-in nebula |
+| ffmpeg *(optional)* | video wallpapers | video wallpapers can't be prepared; pictures still work |
+| Wallpaper Engine *(optional, paid)* | its wallpapers | your own `wallpapers` folder and the built-in nebula |
 
 ```powershell
 winget install LibreHardwareMonitor.LibreHardwareMonitor
@@ -49,9 +49,11 @@ winget install Gyan.FFmpeg
   launch. See [CPU temperature](#cpu-temperature) for why a kernel driver is
   involved.
 - **ffmpeg** is used once per video wallpaper; the result is cached, so it is not
-  needed again for that wallpaper.
+  needed again for that wallpaper. Still pictures never need it.
 - **Wallpaper Engine is not free and is not included here.** If you want its
   wallpapers, buy it on Steam — see [Credits and legal](#credits-and-legal).
+  You do not need it at all to use your own pictures and videos — drop them in
+  the `wallpapers` folder instead, see [Wallpapers](#wallpapers).
 
 Running from source additionally needs Python 3 (standard library only).
 
@@ -237,7 +239,7 @@ viewer's browser storage. So it is set from this PC and every viewer follows,
 without anyone touching the iPad.
 
 Set it from the **tray icon → Wallpaper**, which lists the built-in shader plus
-every usable Wallpaper Engine wallpaper, with a tick beside the current one.
+every usable wallpaper from both libraries, with a tick beside the current one.
 The choice rides along on the 1 Hz `/api/stats` poll the page already makes, so
 the iPad switches within about a second. It survives a server restart.
 
@@ -393,15 +395,47 @@ Undo it with
 The dashboard server needs no elevation of its own, so a Startup shortcut to
 `pythonw.exe E:\Ipad\server.py` is enough — `pythonw` keeps the console hidden.
 
-## Wallpaper Engine wallpapers
+## Wallpapers
 
-Tap **Wallpaper** in the top right to choose from the ones you have already
-downloaded. Wallpaper Engine itself is never launched — `wallpapers.py` only
-reads the files its workshop downloads left on disk, under
+Tap **Wallpaper** in the top right. The picker lists two libraries: your own
+`wallpapers` folder first, then anything Wallpaper Engine has downloaded.
+
+### Your own folder
+
+`wallpapers\` beside the exe is yours. It needs neither Steam nor Wallpaper
+Engine, so whatever you put in it travels with the app — copy the folder to
+another PC and the wallpapers come along.
+
+| drop in | becomes |
+|---|---|
+| `sunset.jpg` | a still wallpaper |
+| `loop.mp4` | a video wallpaper |
+| `loop.mp4` + `loop.jpg` | the same, with the .jpg as its thumbnail |
+| a folder of files | every picture and video in it, listed separately |
+| a folder with `index.html` | one web wallpaper |
+| a folder copied out of the workshop | read exactly as the workshop copy is |
+
+**Pictures:** `.jpg` `.jpeg` `.png` `.gif` `.webp` `.avif` — served as they
+are, with no transcode and no need for ffmpeg. Animated GIFs animate.
+
+**Video:** `.mp4` `.m4v` `.mov` `.mkv` `.webm` `.avi`. `.mp4` (H.264) is the
+native case and the cheapest: one already at or under 768p is copied rather
+than re-encoded. Everything else is transcoded to .mp4 first, so it needs
+ffmpeg.
+
+Subfolders are followed four deep, and names are prefixed by the folder they
+sit in, so `Frieren/odyssey.mp4` lists as *Frieren/odyssey*. Drop a file in
+and reopen the picker — the folder is re-read every time it opens, so there is
+nothing to restart. Set `CASEGAUGE_WALLPAPERS` to put the folder elsewhere.
+
+### Wallpaper Engine
+
+Wallpaper Engine itself is never launched — `wallpapers.py` only reads the
+files its workshop downloads left on disk, under
 `steamapps/workshop/content/431960`. Set `WALLPAPER_DIR` to override the
 location.
 
-Only two of the four Wallpaper Engine types can travel to an iPad:
+Only two of its four types can travel to an iPad:
 
 | type | works | why |
 |---|---|---|
@@ -410,7 +444,18 @@ Only two of the four Wallpaper Engine types can travel to an iPad:
 | **scene** | no | proprietary `.pkg`; only WE's own renderer reads it |
 | **application** | no | it's an .exe |
 
-Your library is **20 usable of 70** — the other 50 are scene wallpapers.
+A workshop library is mostly scenes — roughly 20 usable of 70 is typical.
+Scene wallpapers are the ones Wallpaper Engine advertises as "live", so a
+newly downloaded one very often turns out to be unusable here.
+
+**Unusable wallpapers are still listed**, greyed out and captioned with the
+reason. They used to be hidden, which made a wallpaper the scan had rejected
+look exactly like one it had never found. If a new download does not appear
+at all, it is not in any scanned folder; if it appears greyed out, the caption
+says why.
+
+A preset — a saved settings file with a `dependency` on another wallpaper — is
+listed too, and is never usable on its own.
 
 ### Transcoding
 
@@ -427,8 +472,13 @@ Aspect ratio is preserved and the browser crops with `object-fit: cover`, so a
 16:9 loop fills the 4:3 panel and still looks right if the iPad rotates.
 `+faststart` is set, so Safari begins playing before the download finishes.
 
+A source already at or under `TARGET_HEIGHT` is never enlarged; if it is
+already .mp4 as well, it is copied instead of re-encoded.
+
 Tuning lives at the top of `wallpapers.py`: `TARGET_HEIGHT` and `MAX_BITRATE`.
 Delete anything in `cache/` to force a re-encode.
+
+Still pictures skip all of this — they are sent as-is.
 
 ### Web wallpapers
 

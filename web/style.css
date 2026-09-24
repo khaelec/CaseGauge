@@ -64,6 +64,7 @@ html, body {
 
 #wallpaper,
 #wallpaper-video,
+#wallpaper-image,
 #wallpaper-web {
   position: fixed;
   inset: 0;
@@ -76,10 +77,12 @@ html, body {
 
 #wallpaper[hidden],
 #wallpaper-video[hidden],
+#wallpaper-image[hidden],
 #wallpaper-web[hidden] { display: none; }
 
 /* cover, so a 16:9 loop fills the iPad's 4:3 panel without letterboxing */
-#wallpaper-video { object-fit: cover; background: var(--bg); }
+#wallpaper-video,
+#wallpaper-image { object-fit: cover; background: var(--bg); }
 
 /* Darkens the edges so white text stays legible over a bright shader frame. */
 .vignette {
@@ -440,6 +443,7 @@ html, body {
    wallpaper is this full-screen scrim. Photographic wallpapers get a stronger
    one than the built-in shader, which is already dark. */
 body[data-wp="video"] .vignette,
+body[data-wp="image"] .vignette,
 body[data-wp="web"] .vignette {
   background:
     radial-gradient(ellipse at 50% 45%, rgba(0,0,0,0.26) 25%, rgba(0,0,0,0.62) 100%),
@@ -447,6 +451,7 @@ body[data-wp="web"] .vignette {
 }
 
 body[data-wp="video"] .sub,
+body[data-wp="image"] .sub,
 body[data-wp="web"] .sub { color: var(--ink); opacity: 0.75; }
 
 /* ---- wallpaper picker -------------------------------------------------- */
@@ -550,6 +555,12 @@ body.is-idle .bar-right .zoom {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   gap: 12px;
+  /* Rows sized from the tile's aspect ratio, packed at the top. Plain 'auto'
+     rows size to the tile's text instead, which looks fine only while the
+     grid has spare space to stretch into - once the list is long enough to
+     scroll, every row collapses and the tiles overlap. */
+  grid-auto-rows: max-content;
+  align-content: start;
 }
 
 .tile {
@@ -561,6 +572,9 @@ body.is-idle .bar-right .zoom {
   cursor: pointer;
   padding: 0;
   aspect-ratio: 16 / 10;
+  /* Without this the grid row sets the height and the aspect ratio is
+     ignored, which is what collapses the tiles once the list overflows. */
+  align-self: start;
   -webkit-tap-highlight-color: transparent;
 }
 
@@ -598,6 +612,31 @@ body.is-idle .bar-right .zoom {
   background: rgba(0, 0, 0, 0.62);
   border-radius: 999px;
   padding: 0.3em 0.6em;
+}
+
+/* Listed but not selectable. Shown rather than hidden, so a wallpaper the
+   scan rejected cannot be mistaken for one it never found. */
+.tile.is-blocked { cursor: default; }
+.tile.is-blocked img { filter: grayscale(1) brightness(0.45); }
+.tile.is-blocked .tile-name { color: var(--ink-faint); }
+.tile.is-blocked.tile-shader {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--ink-faint);
+}
+
+.tile-reason {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.6em 0.7em 2.4em;
+  font-size: 10px;
+  line-height: 1.35;
+  font-weight: 600;
+  text-align: center;
+  color: var(--ink);
+  background: rgba(0, 0, 0, 0.45);
 }
 
 .tile.tile-shader {

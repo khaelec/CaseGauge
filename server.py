@@ -767,7 +767,7 @@ def get_wallpaper():
 
 def set_wallpaper(choice):
     clean = {"mode": choice.get("mode") or "shader"}
-    if clean["mode"] in ("video", "web"):
+    if clean["mode"] in ("video", "web", "image"):
         clean["id"] = str(choice.get("id") or "")
         clean["title"] = choice.get("title") or ""
         if not clean["id"]:
@@ -1128,6 +1128,8 @@ class Handler(SimpleHTTPRequestHandler):
             self._json({
                 "items": items,
                 "ffmpeg": bool(wallpapers.FFMPEG),
+                # So the picker can tell the user where to drop their own.
+                "local_dir": wallpapers.local_dir(),
             })
             return
 
@@ -1157,6 +1159,17 @@ class Handler(SimpleHTTPRequestHandler):
                     self.send_error(409, "not prepared yet")
                     return
                 self._send_file(path)
+                return
+
+            if what == "image":
+                if item["type"] != "image":
+                    self.send_error(404)
+                    return
+                target = wallpapers.safe_join(item["folder"], item["entry"])
+                if target is None:
+                    self.send_error(403)
+                    return
+                self._send_file(target)
                 return
 
             if what == "preview":
@@ -1277,6 +1290,13 @@ def main():
         except KeyboardInterrupt:
             print("stopped")
         return 0
+
+    # Created empty on first run. A folder that is not there is one the user
+    # cannot find, and the picker prints this path as the place to drop files.
+    try:
+        os.makedirs(wallpapers.local_dir(), exist_ok=True)
+    except OSError:
+        pass
 
     threading.Thread(target=server.serve_forever, daemon=True).start()
     lan = "http://" + local_ip() + ":" + str(PORT) + "/"

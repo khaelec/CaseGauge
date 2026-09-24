@@ -1,8 +1,9 @@
-/* Wallpaper renderer with three modes.
+/* Wallpaper renderer with four modes.
  *
  *   shader  a WebGL nebula drawn on the iPad's own GPU (the default)
  *   video   a Wallpaper Engine video loop, transcoded PC-side to iPad size
  *   web     a Wallpaper Engine web wallpaper, in an iframe behind an API shim
+ *   image   a still from the local folder, served as-is
  *
  * Only one is live at a time; switching tears the previous one down so a
  * paused video or a hidden iframe is never left burning battery.
@@ -81,6 +82,7 @@ window.Wallpaper = (function () {
   var canvas = document.getElementById('wallpaper');
   var video = document.getElementById('wallpaper-video');
   var frame = document.getElementById('wallpaper-web');
+  var still = document.getElementById('wallpaper-image');
 
   // iOS throws the WebGL context away while the device sleeps. Without these
   // the shader silently never draws again after waking - the canvas just
@@ -107,6 +109,13 @@ window.Wallpaper = (function () {
   var running = false, start = 0, last = 0;
   var minDelta = 1000 / TARGET_FPS;
   var current = { mode: 'shader' };
+
+  // Wallpapers whose file turned out to be missing. The PC owns the choice and
+  // re-asserts it on every 1 Hz poll, so `current` has to keep pointing at the
+  // dead wallpaper - clearing it would make the poll re-apply it a second
+  // later, forever. Instead the shader is drawn in its place.
+  var missing = {};
+  function keyOf(c) { return c.mode + ':' + (c.id || ''); }
   var onStatus = function () {};
 
   // ---- shader ------------------------------------------------------------
@@ -225,10 +234,16 @@ window.Wallpaper = (function () {
     frame.removeAttribute('src');
   }
 
+  function clearImage() {
+    still.hidden = true;
+    still.removeAttribute('src');
+  }
+
   function stopAll() {
     stopShader();
     clearVideo();
     clearWeb();
+    clearImage();
   }
 
   // ---- video -------------------------------------------------------------
@@ -280,12 +295,24 @@ window.Wallpaper = (function () {
     // nebula washes out completely over video.
     document.body.dataset.wp = choice.mode;
 
+    if (missing[keyOf(choice)]) {
+      document.body.dataset.wp = 'shader';
+      startShader();
+      return;
+    }
+
     if (choice.mode === 'video') {
       playVideo(choice);
     } else if (choice.mode === 'web') {
       onStatus('');
       frame.hidden = false;
       frame.src = '/media/' + choice.id + '/web';
+    } else if (choice.mode === 'image') {
+      // Nothing to transcode and nothing to poll for - it is already a file
+      // the browser can read.
+      onStatus('');
+      still.hidden = false;
+      still.src = '/media/' + choice.id + '/image';
     } else {
       onStatus('');
       startShader();
@@ -327,10 +354,23 @@ window.Wallpaper = (function () {
     if (current.mode === 'video') setTimeout(function () { apply(current); }, 2000);
   });
 
+  // A still that will not load has almost always been deleted or renamed in
+  // the wallpapers folder, which is a thing people do now that the folder is
+  // theirs to manage. Retrying cannot bring it back, so fall back to the
+  // shader rather than leaving the screen empty.
+  still.addEventListener('error', function () {
+    if (current.mode !== 'image') return;
+    missing[keyOf(current)] = true;
+    onStatus('that picture is gone - back to the nebula');
+    apply(current);          // same choice, now drawn as the shader
+  });
+
   return {
     resume: resume,
     apply: apply,
     current: function () { return current; },
+    // Picking a wallpaper by hand is a fair claim that it is back.
+    retry: function (choice) { delete missing[keyOf(choice)]; },
     onStatus: function (fn) { onStatus = fn; }
   };
 })();
