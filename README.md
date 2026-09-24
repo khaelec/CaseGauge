@@ -1,13 +1,26 @@
-# CaseGauge — iPad dashboard
+# CaseGauge — a live PC monitor for a spare screen
 
-A live wallpaper and at-a-glance PC stats panel for an iPad, served from this PC
-over WiFi. No App Store app, no sideloading, no spacedesk, no virtual display
-driver.
+CaseGauge turns a spare display into an at-a-glance PC stats panel with a live
+wallpaper — a **side monitor**, or a **tablet or phone you already have**, over
+your local WiFi. Open it in any modern browser (Safari on iOS, Chrome on
+Android) or add it to the Home Screen. No App Store app, no sideloading, no
+cloud, no account.
 
-The iPad opens a web page in Safari and adds it to the Home Screen. The
-wallpaper is a WebGL shader rendered **on the iPad**, so the PC never streams
-video — it sends about 200 bytes of JSON per second instead of ~20 Mbit/s of
-H.264.
+The wallpaper is a WebGL shader rendered **on the device**, so the PC never
+streams video — it sends about 200 bytes of JSON per second instead of
+~20 Mbit/s of H.264.
+
+## Project status
+
+CaseGauge is a small, **low-resource** utility and is **not actively developed**.
+Expect updates only for **major bugs**, not new features — issues and pull
+requests may go unanswered. It is provided as-is; see `LICENSE`.
+
+None of the third-party applications it relies on — **LibreHardwareMonitor,
+ffmpeg, Wallpaper Engine, the NVIDIA drivers, or Windows** — are owned, made, or
+licensed by me. They are separate products from their respective authors; you
+obtain and license them yourself, under their own terms. See
+`THIRD-PARTY-NOTICES.md`.
 
 ## Requirements
 
@@ -538,6 +551,10 @@ wallpapers are proprietary and are rendered only by Wallpaper Engine itself.
 
 ### Other dependencies
 
+**None of these are owned, made, or licensed by me.** They are separate
+products from their respective authors, and you obtain them yourself under
+their own terms.
+
 - **LibreHardwareMonitor** (MPL-2.0) — CPU temperature only. Install it
   yourself; it is not bundled.
 - **ffmpeg** (LGPL-2.1+, or GPL for `--enable-gpl` builds) — video transcoding.
@@ -554,9 +571,10 @@ has **no authentication and no TLS** — keep it on a trusted, private LAN.
 
 ### Support the project
 
-CaseGauge is free. If it is useful to you, you can leave a tip:
+CaseGauge is free, and always will be. If it is useful to you, you can buy me a
+coffee — it is a voluntary tip, not a purchase, and it unlocks nothing:
 
-**`<your Buy Me a Coffee URL here>`**
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-khaelec-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/khaelec)
 
 ## Known limits
 

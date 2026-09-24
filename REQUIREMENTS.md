@@ -48,7 +48,7 @@ the repo and the release are public.
 
 ## R6 · Donation
 
-- [ ] Buy Me a Coffee link in README, worded as a voluntary tip
+- [x] Buy Me a Coffee link in README, worded as a voluntary tip that unlocks nothing
 
 ## R7 · Hardening (optional)
 
