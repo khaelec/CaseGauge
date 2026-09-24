@@ -3,7 +3,7 @@
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-khaelec-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/khaelec)
 
 CaseGauge turns a spare display into an at-a-glance PC stats panel with a live
-wallpaper — a **side monitor**, or a **tablet or phone you already have**, over
+wallpaper a **side monitor**, or a **tablet or phone you already have**, over
 your local WiFi. Open it in any modern browser (Safari on iOS, Chrome on
 Android) or add it to the Home Screen. No App Store app, no sideloading, no
 cloud, no account.
