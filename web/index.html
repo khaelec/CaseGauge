@@ -67,6 +67,10 @@
             <div class="track"><div class="fill" id="cpu-load-bar"></div></div>
           </div>
         </div>
+        <div class="chips" data-row="clocks">
+          <span class="chip"><b id="cpu-clock">--</b> MHz</span>
+          <span class="chip"><b id="cpu-power">--</b> W</span>
+        </div>
       </div>
     </article>
 
@@ -96,6 +100,10 @@
           <span class="chip"><b id="gpu-fan">--</b> <span id="gpu-fan-unit">% fan</span></span>
           <span class="chip"><b id="gpu-junction">--</b> &deg;C <span id="gpu-junction-unit">junction</span></span>
         </div>
+        <div class="chips" data-row="clocks">
+          <span class="chip"><b id="gpu-core-mhz">--</b> MHz core</span>
+          <span class="chip"><b id="gpu-mem-mhz">--</b> MHz mem</span>
+        </div>
       </div>
     </article>
 
@@ -121,6 +129,48 @@
         </div>
       </div>
       <div class="chips drives" id="disk-chips" data-row="drives"></div>
+    </article>
+
+    <article class="card" id="card-cool" data-card="cool" hidden>
+      <div class="card-head">
+        <h2>Cooling</h2>
+        <p class="sub" id="cool-sub">&nbsp;</p>
+      </div>
+      <div class="readout">
+        <span class="temp" data-row="temp">
+          <span class="value" id="cool-temp">--</span><span class="unit">&deg;C</span>
+        </span>
+      </div>
+      <div class="side">
+        <div class="chips" id="fan-chips" data-row="fans"></div>
+        <div class="chips drives" id="board-chips" data-row="board"></div>
+      </div>
+    </article>
+
+    <article class="card" id="card-net" data-card="net" hidden>
+      <div class="card-head">
+        <h2>Network</h2>
+        <p class="sub" id="net-name">&nbsp;</p>
+      </div>
+      <div class="readout">
+        <span class="temp" data-row="rate">
+          <span class="value" id="net-down">--</span><span class="unit"
+                id="net-down-unit">KB/s</span>
+        </span>
+      </div>
+      <div class="side">
+        <div class="meters">
+          <div class="meter" data-row="load">
+            <div class="meter-label"><span>Utilisation</span><span id="net-util-text">--%</span></div>
+            <div class="track"><div class="fill" id="net-util-bar"></div></div>
+          </div>
+        </div>
+        <div class="chips" data-row="totals">
+          <span class="chip"><b id="net-up">--</b> <span id="net-up-unit">KB/s up</span></span>
+          <span class="chip"><b id="net-total-down">--</b> GB in</span>
+          <span class="chip"><b id="net-total-up">--</b> GB out</span>
+        </div>
+      </div>
     </article>
 
   </section>

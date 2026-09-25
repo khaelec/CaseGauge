@@ -291,6 +291,44 @@ restart. One that disappears has its card removed after 90 seconds - long
 enough that LibreHardwareMonitor starting up late, which is when a GPU only it
 can see first shows up, does not make a card flicker in and out.
 
+### Fans, board temperatures, clocks and the network
+
+Five more readings are available, all of them **off by default** and all of them
+from LibreHardwareMonitor. Turn them on in **Layout** (page or tray):
+
+- **Cooling card** - every fan header that is turning, in RPM, plus the board's
+  own temperatures (System, VRM, PCH, Socket). The headline is the System
+  temperature: the one number that describes the inside of the case rather than
+  one component in it.
+- **Network card** - download speed as the headline, a utilisation meter, and
+  upload plus session totals. The busiest adapter, not a list of every virtual
+  one.
+- **CPU card**, *Clock / Package power* row - average core clock and package
+  watts.
+- **GPU card**, *Core / Memory clock* row - core and memory clock, per card.
+- **Memory card**, drive chips - each drive now also carries its temperature
+  and, below 100%, its remaining life.
+
+The fan row shows **RPM rather than the control percentage** on purpose: a
+header commanded to 60% that reads 0 is a dead fan, and that is the whole reason
+to look at this row.
+
+A fan header reading **0 RPM is hidden**. A board exposes every header it has
+whether anything is plugged into it or not - this one reports eight and five
+read zero - so listing them all is mostly noise on a card meant to be read from
+across a room. The cost of that choice is worth stating plainly: the row tells
+you which fans are *turning*, not which fans *exist*, so a fan that fails
+disappears rather than showing a zero.
+
+Drive temperature has to know which physical disk is behind a drive letter,
+because LHM names drives by model where Windows names them by letter. That comes
+from `IOCTL_STORAGE_QUERY_PROPERTY` on the volume - no admin, and it opens the
+volume with no access rights at all, so it is a query and not a read of the
+disk. Two letters on one SSD correctly report the same temperature.
+
+With five or six cards shown the grid becomes **two rows** rather than six thin
+columns, in either orientation, so the cards keep a readable width.
+
 ### Per-core load
 
 The CPU card shows a small square beside the temperature: one bar per **logical
@@ -719,6 +757,12 @@ coffee — it is a voluntary tip, not a purchase, and it unlocks nothing:
 ## Known limits
 
 - No authentication or TLS. LAN only, `Private` firewall profile only.
+- **Everything on the Cooling and Network cards needs LibreHardwareMonitor.**
+  There is no CLI for board fans, board temperatures, NVMe health or adapter
+  throughput, so without LHM running elevated those cards say so rather than
+  showing zeros. The same is true of the clock and package-power rows.
+- **A stopped fan vanishes rather than reading 0**, because headers with nothing
+  plugged into them are hidden by the same rule. See the fan note above.
 - **Multi-GPU is matched by name.** An NVIDIA card seen by both `nvidia-smi` and
   LibreHardwareMonitor is recognised as one card because the two names match. A
   driver that names the same card differently in each would show it twice; the

@@ -237,10 +237,13 @@ def run(url, lan_url, on_quit=None, tooltip="CaseGauge",
                     return          # never hide every card
                 layout = [c for c in layout if c["id"] != cid]
             else:
+                # The default rows, not every row available: a card ticked
+                # back on should look like it did, not like a diagnostic dump.
                 rows = []
                 for card in _schema():
                     if card.get("id") == cid:
-                        rows = [r["id"] for r in card.get("rows") or []]
+                        rows = list(card.get("defaults")
+                                    or [r["id"] for r in card.get("rows") or []])
                 # Back beside its own kind - "gpu2" next to "gpu" - rather than
                 # at the end of the list, which is not where it was hidden from.
                 stem = cid.rstrip("0123456789")

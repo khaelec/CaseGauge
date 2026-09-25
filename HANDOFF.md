@@ -522,6 +522,66 @@ turns the remaining unknown into something the user can read off the screen.
 
 ---
 
+## v1.5: fans, board temperatures, drives and the network
+
+Asked for fan speed; the honest answer was that the app read exactly one fan -
+the GPU's - and nothing else the board exposes. What the machine actually offers
+was found by dumping LHM's whole tree rather than guessing, and that is the
+first thing to do again before adding a sensor.
+
+**The tree is not a fixed depth.** A GPU sits at Computer / GPU / Temperatures,
+but the super-IO chip that owns the fan headers is one deeper: Computer /
+Motherboard / Nuvoton NCT6687D / Fans. The old code walked exactly two levels,
+which is why no board sensor had ever been reachable. `_lhm_devices()` now
+recurses and yields any node whose children are **sensor groups**, where the
+group names are a closed set (`_LHM_GROUPS`) - and that closed set is what keeps
+the motherboard node itself from being mistaken for a device. One walk per poll,
+shared by every reader below it.
+
+**Drive letters to physical disks.** LHM names drives by model, Windows by
+letter, so a temperature could not be attached to a drive chip without asking
+the volume what it sits on. `IOCTL_STORAGE_QUERY_PROPERTY` answers that with no
+admin and `dwDesiredAccess` 0. Two traps, both already paid for:
+
+- `ctypes.WinDLL` defaults `CreateFileW`'s restype to a 32-bit int, which
+  **truncates the HANDLE** and turns every call into ERROR_INVALID_NAME (123) on
+  a path that is perfectly valid. The prototypes are declared explicitly now.
+- In STORAGE_DEVICE_DESCRIPTOR the id offsets are at **12 and 16**, not 8 and
+  12. Getting that wrong returns an empty string rather than an error, which
+  reads like "this drive does not report a model".
+
+Verified: C: to SPCC M.2 PCIe SSD, D: to Fanxiang S501 1TB, E: to SPCC (a second
+partition on the same disk, correctly sharing its temperature), and Z: (a
+network share) to nothing. `merge_drive_health()` copies rather than annotating
+in place, because `read_all_disks()` hands out its cache and a stale temperature
+would otherwise outlive the drive dropping out of LHM by a minute.
+
+**Fans at 0 RPM are hidden.** The user's call, and it is a real trade: this board
+reports eight headers and five read zero, so showing them all is noise - but it
+means the row says which fans are turning, not which exist, and a fan that FAILS
+disappears instead of showing a zero. If that ever needs reversing it is one
+condition in `_lhm_fans()` and the note in the README.
+
+**DEFAULT_ROWS and DEFAULT_CARDS.** `ROW_IDS` is now everything *available* and
+`DEFAULT_ROWS` everything *on* - the same split `card_ids()` and
+`default_card_ids()` already had for the second GPU card. Every reading added
+this turn is off by default. `layout_schema()` carries `defaults` so the tray,
+the page editor and the server agree on what a card looks like when it is ticked
+back on; before this the tray would have turned a card on with every row it has.
+
+**The grid wraps past four cards.** Six cards in one row is 170px each on the
+iPad, narrower than the headline number, and six stacked in portrait clipped the
+meters. Both orientations now go to two rows (landscape) or two columns
+(portrait) above four cards. Measured at 1024x768: 3x2 at 327x367, nothing
+clipped, no overflow; portrait 768x1024 gives 2x3 at 330px.
+
+Per-card GPU fan counts fell out of the same work: these two cards report 2 and
+3 fans and the chip only ever showed the first. It now shows the hardest-working
+fan with the count beside it ("0 % fan x3"), because what matters at a glance is
+whether the card is spinning up, not which individual fan is doing it.
+
+---
+
 ## Not started, but discussed
 
 - **Video wallpaper sharpness.** `TARGET_HEIGHT = 768` in `wallpapers.py` was

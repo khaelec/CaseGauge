@@ -10,6 +10,10 @@ Sensor sources:
   CPU load  GetSystemTimes (ctypes)                no admin
   GPU       nvidia-smi and LibreHardwareMonitor    every card, NVIDIA first
   CPU temp  LibreHardwareMonitor's web server      needs LHM running elevated
+  Fans      LibreHardwareMonitor                   board headers and GPU fans
+  Board     LibreHardwareMonitor                   System / VRM / PCH / Socket
+  Drives    GetDiskFreeSpaceEx + IOCTL + LHM       free space, temp, life
+  Network   LibreHardwareMonitor                   the busiest adapter
 
 Everything except CPU temp works without LibreHardwareMonitor; that field
 simply reports null until LHM is up.
@@ -180,6 +184,109 @@ _disk_cache = {"at": 0.0, "value": []}
 DISK_CACHE_SECONDS = 15.0
 
 
+# ---- which physical drive is behind a letter --------------------------------
+#
+# LHM names drives by model ("SPCC M.2 PCIe SSD") where Windows names them by
+# letter, so its temperature and life readings cannot be attached to a drive
+# chip without asking the volume what it sits on. IOCTL_STORAGE_QUERY_PROPERTY
+# answers that, needs no admin, and opens the volume with dwDesiredAccess 0 -
+# a query, not a read of the disk.
+
+_IOCTL_STORAGE_QUERY_PROPERTY = 0x002D1400
+_VOLUME_PATH = "\\\\.\\%s:"
+
+
+class _STORAGE_PROPERTY_QUERY(ctypes.Structure):
+    _fields_ = [("PropertyId", wintypes.DWORD),
+                ("QueryType", wintypes.DWORD),
+                ("AdditionalParameters", ctypes.c_byte * 1)]
+
+
+# Default restypes would truncate a 64-bit HANDLE to int, which turns every
+# call into ERROR_INVALID_NAME on a path that is perfectly valid.
+_k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+_k32.CreateFileW.restype = wintypes.HANDLE
+_k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                             ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD,
+                             wintypes.HANDLE]
+_k32.DeviceIoControl.argtypes = [wintypes.HANDLE, wintypes.DWORD,
+                                 ctypes.c_void_p, wintypes.DWORD,
+                                 ctypes.c_void_p, wintypes.DWORD,
+                                 ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
+_k32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+_INVALID_HANDLE = wintypes.HANDLE(-1).value
+
+
+def drive_model(root):
+    """The model string of the disk behind a drive letter, or None.
+
+    Two letters on one physical disk return the same model, which is correct -
+    they share its temperature.
+    """
+    letter = (root or "")[:1]
+    if not letter.isalpha():
+        return None                    # a network share has no volume to ask
+    handle = _k32.CreateFileW(_VOLUME_PATH % letter, 0, 3, None, 3, 0, None)
+    if not handle or handle == _INVALID_HANDLE:
+        return None
+    try:
+        query = _STORAGE_PROPERTY_QUERY(0, 0, (ctypes.c_byte * 1)())
+        buf = ctypes.create_string_buffer(1024)
+        written = wintypes.DWORD()
+        ok = _k32.DeviceIoControl(
+            handle, _IOCTL_STORAGE_QUERY_PROPERTY,
+            ctypes.byref(query), ctypes.sizeof(query),
+            buf, ctypes.sizeof(buf), ctypes.byref(written), None)
+        if not ok or written.value < 32:
+            return None
+        raw = buf.raw
+
+        # STORAGE_DEVICE_DESCRIPTOR: the id fields are byte offsets into this
+        # same buffer, pointing at NUL-terminated ASCII. 0 means "not reported".
+        def text_at(offset):
+            if not offset or offset >= len(raw):
+                return ""
+            end = raw.find(bytes(1), offset)      # the NUL that ends the string
+            return raw[offset:end if end >= 0 else None].decode(
+                "latin-1", "replace").strip()
+
+        def u32(offset):
+            return int.from_bytes(raw[offset:offset + 4], "little")
+
+        name = (text_at(u32(12)) + " " + text_at(u32(16))).strip()
+        return name or None
+    except OSError:
+        return None
+    finally:
+        _k32.CloseHandle(handle)
+
+
+def _model_key(name):
+    return re.sub(r"[^a-z0-9]+", "", (name or "").lower())
+
+
+def merge_drive_health(disks, lhm_drives):
+    """Attach each drive's temperature and remaining life to its chip.
+
+    Copies rather than annotating in place: read_all_disks() hands out its
+    cache, and a drive that drops out of LHM must lose its temperature rather
+    than keep showing the last one for a minute.
+    """
+    by_model = {}
+    for drive in lhm_drives or ():
+        by_model.setdefault(_model_key(drive.get("model")), drive)
+
+    out = []
+    for disk in disks or ():
+        copy = dict(disk)
+        health = by_model.get(_model_key(disk.get("model")))
+        copy["temp_c"] = health.get("temp_c") if health else None
+        copy["life"] = health.get("life") if health else None
+        out.append(copy)
+    return out
+
+
 def read_all_disks():
     """Every fixed and network drive, cached.
 
@@ -196,6 +303,7 @@ def read_all_disks():
         info = read_disk(drv["root"])
         if info:
             info["network"] = drv["network"]
+            info["model"] = None if drv["network"] else drive_model(drv["root"])
             out.append(info)
     _disk_cache["at"] = now
     _disk_cache["value"] = out
@@ -392,8 +500,11 @@ def read_gpus():
             "power_w": _num(parts[5]),
             "fan": _num(parts[6]),
             "fan_unit": "%",
+            "fan_count": 1,
             "junction_c": None,
             "hotspot_c": None,
+            "core_mhz": None,
+            "mem_mhz": None,
             "source": "nvidia-smi",
         })
     return gpus
@@ -493,12 +604,20 @@ def _first(items, labels):
     return None
 
 
+# The group names LHM files sensors under. Anything else is not a sensor group,
+# which is how a device node is told apart from the plumbing above it.
+_LHM_GROUPS = frozenset((
+    "voltages", "temperatures", "fans", "controls", "load", "powers",
+    "clocks", "data", "throughput", "levels", "factors", "timings",
+))
+
+
 def _device_groups(device):
     """{group_name: {label: raw_value}} for one LHM device node."""
     groups = {}
     for group in device.get("Children") or ():
         gname = (group.get("Text") or "").strip().lower()
-        if not gname:
+        if gname not in _LHM_GROUPS:
             continue
         items = {}
         for sensor in group.get("Children") or ():
@@ -509,6 +628,25 @@ def _device_groups(device):
         if items:
             groups[gname] = items
     return groups
+
+
+def _lhm_devices(node, out=None):
+    """Every (name, groups) pair in the tree, at any depth.
+
+    A GPU sits two levels down - Computer / GPU / Temperatures - but the
+    super-IO chip that owns the fan headers is three: Computer / Motherboard /
+    Nuvoton NCT6687D / Fans. So this cannot be a fixed-depth walk. A node whose
+    children are sensor groups is a device; anything else is passed through.
+    """
+    if out is None:
+        out = []
+    for child in node.get("Children") or ():
+        groups = _device_groups(child)
+        if groups:
+            out.append(((child.get("Text") or "").strip(), groups))
+        else:
+            _lhm_devices(child, out)
+    return out
 
 
 def _looks_like_gpu(groups):
@@ -528,13 +666,29 @@ def _lhm_gpu_dict(name, groups):
     powers = groups.get("powers", {})
     controls = groups.get("controls", {})
     fans = groups.get("fans", {})
+    clocks = groups.get("clocks", {})
     data = groups.get("data", {})
 
-    fan = _first(controls, ("gpu fan 1", "gpu fan", "fan"))
-    fan_unit = "%"
-    if fan is None:
-        fan = _first(fans, ("gpu fan 1", "gpu fan", "fan"))
-        fan_unit = "RPM"
+    # A card can carry two or three fans - these two report 2 and 3 - and the
+    # chip only ever showed the first. The summary is the hardest-working fan,
+    # with the count beside it, because what matters at a glance is whether the
+    # card is spinning up, not which individual fan is doing it.
+    fan_pcts = [_lhm_num(v) for k, v in controls.items() if k.startswith("gpu fan")]
+    fan_rpms = [_lhm_num(v) for k, v in fans.items() if k.startswith("gpu fan")]
+    fan_pcts = [v for v in fan_pcts if v is not None]
+    fan_rpms = [v for v in fan_rpms if v is not None]
+
+    fan_count = len(fan_pcts) or len(fan_rpms)
+    if fan_pcts:
+        fan, fan_unit = max(fan_pcts), "%"
+    elif fan_rpms:
+        fan, fan_unit = max(fan_rpms), "RPM"
+    else:
+        fan, fan_unit = _first(controls, ("gpu fan", "fan")), "%"
+        if fan is None:
+            fan, fan_unit = _first(fans, ("gpu fan", "fan")), "RPM"
+        fan = _lhm_num(fan)
+        fan_count = 1 if fan is not None else 0
 
     if name not in _lhm_gpu_logged:
         # One-time dump so a user on a card we could not test can report the
@@ -555,13 +709,16 @@ def _lhm_gpu_dict(name, groups):
         "vram_used_gb": _lhm_gb(_first(data, ("gpu memory used",))),
         "vram_total_gb": _lhm_gb(_first(data, ("gpu memory total",))),
         "power_w": _lhm_num(_first(powers, ("gpu package", "gpu power", "gpu core"))),
-        "fan": _lhm_num(fan),
+        "fan": fan,
         "fan_unit": fan_unit,
+        "fan_count": fan_count,
+        "core_mhz": _lhm_num(_first(clocks, ("gpu core",))),
+        "mem_mhz": _lhm_num(_first(clocks, ("gpu memory",))),
         "source": "lhm",
     }
 
 
-def _lhm_gpus_from_tree(tree):
+def _lhm_gpus_from_devices(devices):
     """Every GPU LHM can see, most VRAM first.
 
     Ordering by VRAM rather than by tree position keeps the discrete card ahead
@@ -570,29 +727,198 @@ def _lhm_gpus_from_tree(tree):
     dashboard should lead with.
     """
     found = []
-    for computer in tree.get("Children") or ():
-        for device in computer.get("Children") or ():
-            groups = _device_groups(device)
-            if not _looks_like_gpu(groups):
-                continue
+    for name, groups in devices:
+        if _looks_like_gpu(groups):
             total = _lhm_gb(_first(groups.get("data", {}), ("gpu memory total",)))
             found.append((total if total is not None else 0.0,
-                          device.get("Text") or "GPU", groups))
+                          name or "GPU", groups))
     # Stable, so two identical cards keep the order LHM listed them in.
     found.sort(key=lambda item: -item[0])
     return [_lhm_gpu_dict(name, groups) for _, name, groups in found]
 
 
+# ---- fans, board temps, drives and the network ------------------------------
+#
+# All four come from devices nvidia-smi knows nothing about, so LHM is the only
+# source. They are read from the same fetch as everything else: a second HTTP
+# round trip per poll would cost more than every sensor here put together.
+
+
+def _lhm_bps(text):
+    """LHM's "5.8 KB/s" or "1158.1 MB/s" as bytes per second."""
+    val, unit = _value_unit(text)
+    if val is None:
+        return None
+    mult = {"b/s": 1, "kb/s": 1024, "mb/s": 1024 ** 2, "gb/s": 1024 ** 3}
+    return val * mult.get(unit, 1024)
+
+
+def _is_gpu_device(groups):
+    return _looks_like_gpu(groups)
+
+
+def _is_drive_device(groups):
+    return ("life" in groups.get("levels", {}) or
+            "composite temperature" in groups.get("temperatures", {}))
+
+
+def _is_super_io(groups):
+    """The chip that owns the case fan headers - a board's fans and its own
+    temperatures, with none of the GPU's sensors."""
+    return (("fans" in groups or "controls" in groups)
+            and not _looks_like_gpu(groups))
+
+
+def _is_cpu_device(groups):
+    return ("cpu total" in groups.get("load", {}) or
+            any(k.startswith("core (t") for k in groups.get("temperatures", {})))
+
+
+# A fan header's label, shortened to fit a chip.
+_FAN_LABELS = {"cpu fan": "CPU", "pump fan": "Pump", "fan": "Fan",
+               "cpu optional fan": "CPU opt", "chipset fan": "Chipset"}
+
+
+def _fan_label(label):
+    if label in _FAN_LABELS:
+        return _FAN_LABELS[label]
+    if label.startswith("system fan"):
+        return "Sys" + label[len("system fan"):].replace(" ", " ")
+    return label.title()
+
+
+def _lhm_fans(devices):
+    """Case and cooler fans, the ones actually turning.
+
+    A board exposes every header it has whether anything is plugged into it or
+    not - this one reports eight and five of them read 0 - so a list of all of
+    them is mostly noise on a card meant to be read from across a room. A fan
+    at 0 RPM is dropped. The cost of that choice: a fan that FAILS disappears
+    rather than showing 0, so this row says which fans are turning, not which
+    fans exist.
+    """
+    out = []
+    for name, groups in devices:
+        if not _is_super_io(groups):
+            continue
+        fans = groups.get("fans", {})
+        controls = groups.get("controls", {})
+        for label in fans:
+            rpm = _lhm_num(fans[label])
+            if not rpm:                    # 0 RPM or unreadable: not a fan
+                continue
+            out.append({"name": _fan_label(label), "rpm": rpm,
+                        "percent": _lhm_num(controls.get(label))})
+    return out
+
+
+# Board temperatures worth a chip, and what to call them. Curated because a
+# super-IO also reports thresholds and dead headers, and "M2 #1 = 0.0" is not a
+# temperature.
+_BOARD_LABELS = {
+    "system": "System", "vrm mos": "VRM", "vrm": "VRM", "pch": "PCH",
+    "chipset": "Chipset", "cpu socket": "Socket", "motherboard": "Board",
+}
+_BOARD_SKIP = ("limit", "resolution", "critical", "warning", "average")
+
+
+def _lhm_board(devices):
+    """The board's own temperatures. Not the CPU's - that has a better source."""
+    out = []
+    for name, groups in devices:
+        if not _is_super_io(groups):
+            continue
+        for label, raw in groups.get("temperatures", {}).items():
+            if label == "cpu" or any(w in label for w in _BOARD_SKIP):
+                continue
+            temp = _lhm_num(raw)
+            if not temp:                   # a header with nothing on it
+                continue
+            out.append({"name": _BOARD_LABELS.get(label, label.title()),
+                        "temp_c": temp})
+    # Known names first and in a stable order, so the chips do not reshuffle.
+    order = list(_BOARD_LABELS.values())
+    out.sort(key=lambda b: (order.index(b["name"]) if b["name"] in order
+                            else len(order), b["name"]))
+    return out[:4]
+
+
+def _lhm_drives(devices):
+    """Temperature and remaining life per physical drive, keyed by its model.
+
+    LHM names drives by model where Windows names them by letter, so matching
+    the two is left to read_all_disks(), which asks the volume itself.
+    """
+    out = []
+    for name, groups in devices:
+        if not _is_drive_device(groups):
+            continue
+        temps = groups.get("temperatures", {})
+        out.append({
+            "model": name,
+            "temp_c": _lhm_num(_first(temps, ("composite temperature",
+                                              "temperature"))),
+            "life": _lhm_num(groups.get("levels", {}).get("life")),
+        })
+    return out
+
+
+def _lhm_net(devices):
+    """The busiest network adapter. One card, not a list: a machine has several
+    adapters and only one of them is usually carrying anything."""
+    best = None
+    best_total = -1.0
+    for name, groups in devices:
+        through = groups.get("throughput", {})
+        if "download speed" not in through:
+            continue
+        data = groups.get("data", {})
+        down_gb = _lhm_gb(data.get("data downloaded"))
+        up_gb = _lhm_gb(data.get("data uploaded"))
+        total = (down_gb or 0.0) + (up_gb or 0.0)
+        if total <= best_total:
+            continue
+        best_total = total
+        best = {
+            "name": name,
+            "down_bps": _lhm_bps(through.get("download speed")),
+            "up_bps": _lhm_bps(through.get("upload speed")),
+            "down_gb": down_gb,
+            "up_gb": up_gb,
+            "util": _lhm_num(groups.get("load", {}).get("network utilization")),
+        }
+    return best
+
+
+def _lhm_cpu_extras(devices):
+    """The CPU's average clock and package power. Its temperature is read from
+    the tree-wide scan instead, which already handles AMD and Intel naming."""
+    for name, groups in devices:
+        if not _is_cpu_device(groups):
+            continue
+        return {
+            "clock_mhz": _lhm_num(_first(groups.get("clocks", {}),
+                                         ("cores (average)", "core #1",
+                                          "bus speed"))),
+            "power_w": _lhm_num(_first(groups.get("powers", {}),
+                                       ("package", "cpu package"))),
+        }
+    return {"clock_mhz": None, "power_w": None}
+
+
 def read_lhm():
     """Everything worth having from LibreHardwareMonitor, in one fetch.
 
-    Returns {"cpu_temp": C or None, "gpu_junction": C or None,
-    "gpus": [dict]}. When LHM is absent this must fail fast, or one dead
+    Returns the CPU temperature, clock and package power, the GPU list, the
+    fans that are turning, the board temperatures, per-drive health and the
+    busiest network adapter. When LHM is absent this must fail fast, or one dead
     sensor drags the whole poll loop below its 1 Hz budget.
     """
     global _lhm_quiet_until
 
-    empty = {"cpu_temp": None, "gpu_junction": None, "gpus": []}
+    empty = {"cpu_temp": None, "cpu_clock_mhz": None, "cpu_power_w": None,
+             "gpu_junction": None, "gpus": [], "fans": [], "board": [],
+             "drives": [], "net": None}
 
     now = time.monotonic()
     if now < _lhm_quiet_until:
@@ -629,10 +955,20 @@ def read_lhm():
                 return candidates[wanted]
         return None
 
+    # One walk of the tree, shared by every reader below it.
+    devices = _lhm_devices(tree)
+    cpu = _lhm_cpu_extras(devices)
+
     return {
         "cpu_temp": first_of(_TEMP_LABELS),
+        "cpu_clock_mhz": cpu["clock_mhz"],
+        "cpu_power_w": cpu["power_w"],
         "gpu_junction": first_of(_JUNCTION_LABELS),
-        "gpus": _lhm_gpus_from_tree(tree),
+        "gpus": _lhm_gpus_from_devices(devices),
+        "fans": _lhm_fans(devices),
+        "board": _lhm_board(devices),
+        "drives": _lhm_drives(devices),
+        "net": _lhm_net(devices),
     }
 
 
@@ -673,14 +1009,19 @@ def merge_gpus(nvidia, lhm_gpus, junction_fallback=None):
         claimed.add(match)
         target = merged[match]
         for field in ("temp_c", "junction_c", "hotspot_c", "load",
-                      "vram_used_gb", "vram_total_gb", "power_w"):
+                      "vram_used_gb", "vram_total_gb", "power_w",
+                      "core_mhz", "mem_mhz"):
             if target.get(field) is None and extra.get(field) is not None:
                 target[field] = extra[field]
-        if target.get("fan") is None and extra.get("fan") is not None:
-            # The unit travels with the reading: LHM may only have RPM where
-            # nvidia-smi would have reported a percentage.
+        if extra.get("fan") is not None and (
+                target.get("fan") is None
+                or (extra.get("fan_count") or 1) > (target.get("fan_count") or 1)):
+            # The unit and the count travel with the reading: LHM may only have
+            # RPM where nvidia-smi reports a percentage, and nvidia-smi reports
+            # one fan where LHM can see all three.
             target["fan"] = extra["fan"]
             target["fan_unit"] = extra.get("fan_unit") or "%"
+            target["fan_count"] = extra.get("fan_count") or 1
 
     # Discrete ahead of integrated, so card 1 is the one worth looking at.
     # Stable, so two identical cards keep their bus order.
@@ -721,19 +1062,41 @@ ZOOM_MIN, ZOOM_MAX = 0.6, 2.4
 # follows on its next 1 Hz poll. A card that is absent from the list is hidden;
 # the list order is the on-screen order.
 ROW_IDS = {
+    "cpu": ("temp", "load", "cores", "clocks"),
+    "gpu": ("temp", "load", "vram", "chips", "clocks"),
+    "ram": ("temp", "load", "free", "drives"),
+    "cool": ("temp", "fans", "board"),
+    "net": ("rate", "load", "totals"),
+}
+CARD_ORDER = ("cpu", "gpu", "ram", "cool", "net")
+CARD_LABELS = {"cpu": "CPU", "gpu": "GPU", "ram": "Memory",
+               "cool": "Cooling", "net": "Network"}
+ROW_LABELS = {
+    "cpu": {"temp": "Temperature", "load": "Load meter",
+            "cores": "Per-core square", "clocks": "Clock / Package power"},
+    "gpu": {"temp": "Temperature", "load": "Load meter", "vram": "VRAM meter",
+            "chips": "Power / Fan / Junction",
+            "clocks": "Core / Memory clock"},
+    "ram": {"temp": "Temperature", "load": "In-use meter", "free": "Free GB",
+            "drives": "Drive chips"},
+    "cool": {"temp": "System temperature", "fans": "Fan speeds",
+             "board": "Board temperature chips"},
+    "net": {"rate": "Download speed", "load": "Utilisation meter",
+            "totals": "Upload and session totals"},
+}
+
+# What a fresh install shows, card by card and row by row. Everything added
+# after v1.3 is offered rather than imposed - the same call as the second GPU
+# card, for the same reason: a dashboard read from across a room earns its
+# space, and nobody asked for eight more numbers by default. ROW_IDS stays the
+# full set, so the Layout menus list what is available and a tick brings it in.
+DEFAULT_CARDS = ("cpu", "gpu", "ram")
+DEFAULT_ROWS = {
     "cpu": ("temp", "load", "cores"),
     "gpu": ("temp", "load", "vram", "chips"),
     "ram": ("temp", "load", "free", "drives"),
-}
-CARD_ORDER = ("cpu", "gpu", "ram")
-CARD_LABELS = {"cpu": "CPU", "gpu": "GPU", "ram": "Memory"}
-ROW_LABELS = {
-    "cpu": {"temp": "Temperature", "load": "Load meter",
-            "cores": "Per-core square"},
-    "gpu": {"temp": "Temperature", "load": "Load meter", "vram": "VRAM meter",
-            "chips": "Power / Fan / Junction"},
-    "ram": {"temp": "Temperature", "load": "In-use meter", "free": "Free GB",
-            "drives": "Drive chips"},
+    "cool": ("temp", "fans", "board"),
+    "net": ("rate", "load", "totals"),
 }
 
 
@@ -772,14 +1135,15 @@ def card_ids():
 
 
 def default_card_ids():
-    """The cards a fresh install shows: one GPU, whatever the machine holds.
+    """The cards a fresh install shows: CPU, one GPU, Memory.
 
-    A second GPU is usually an onboard chip nobody wants a card for, so the
-    extra cards are offered rather than imposed - they exist in card_ids(), so
-    the Layout menu lists them and a tick brings them in, but the default
-    dashboard is the same three cards it always was.
+    A second GPU is usually an onboard chip nobody wants a card for, and
+    Cooling and Network are extra by definition, so all of them are offered
+    rather than imposed - they exist in card_ids(), so the Layout menus list
+    them and a tick brings them in.
     """
-    return [cid for cid in card_ids() if gpu_slot(cid) < 2]
+    return [cid for cid in card_ids()
+            if gpu_slot(cid) < 2 and card_kind(cid) in DEFAULT_CARDS]
 
 
 def card_label(cid):
@@ -800,13 +1164,14 @@ def layout_schema():
     return [
         {"id": cid, "label": card_label(cid),
          "rows": [{"id": r, "label": ROW_LABELS[card_kind(cid)][r]}
-                  for r in ROW_IDS[card_kind(cid)]]}
+                  for r in ROW_IDS[card_kind(cid)]],
+         "defaults": list(DEFAULT_ROWS[card_kind(cid)])}
         for cid in card_ids()
     ]
 
 
 def default_layout():
-    return [{"id": cid, "rows": list(ROW_IDS[card_kind(cid)])}
+    return [{"id": cid, "rows": list(DEFAULT_ROWS[card_kind(cid)])}
             for cid in default_card_ids()]
 
 
@@ -1077,6 +1442,8 @@ def poll_once():
             "load": read_cpu_load(),
             "cores": read_cpu_cores(),
             "temp_c": cpu_temp,
+            "clock_mhz": lhm.get("cpu_clock_mhz"),
+            "power_w": lhm.get("cpu_power_w"),
             "threads": os.cpu_count(),
         },
         # "gpu" is the leading card, kept so an older cached page still paints
@@ -1085,7 +1452,12 @@ def poll_once():
         "gpus": gpus,
         "ram": read_ram(),
         "disk": read_disk(),
-        "disks": read_all_disks(),
+        "disks": merge_drive_health(read_all_disks(), lhm.get("drives")),
+        # Fans, board temperatures and the network only exist while LHM is up.
+        # Absent it they are empty, and their cards say so rather than lying.
+        "fans": lhm.get("fans") or [],
+        "board": lhm.get("board") or [],
+        "net": lhm.get("net"),
     }
 
 

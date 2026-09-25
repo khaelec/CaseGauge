@@ -15,6 +15,9 @@
   // The 5700X3D runs hot by design and only throttles in the 80s.
   var CPU_HEAT = [65, 82];
   var GPU_HEAT = [60, 78];
+  // Inside the case runs far cooler than any chip in it: 45 is warm for a
+  // board sensor and 55 means the airflow has stopped.
+  var CASE_HEAT = [45, 55];
 
   var $ = function (id) { return document.getElementById(id); };
 
@@ -297,7 +300,9 @@
     setBar(gel(cardId, 'vram-bar'), vramPct);
     setNum(gel(cardId, 'gpu-power'), padTo(fmt(gpu.power_w, 0), 3));
     setNum(gel(cardId, 'gpu-fan'), padTo(fmt(gpu.fan, 0), 3));
-    setText(gel(cardId, 'gpu-fan-unit'), gpu.fan_unit === 'RPM' ? 'RPM' : '% fan');
+    var fanUnit = (gpu.fan_unit === 'RPM' ? 'RPM' : '% fan');
+    if (gpu.fan_count > 1) fanUnit += ' ×' + gpu.fan_count;
+    setText(gel(cardId, 'gpu-fan-unit'), fanUnit);
 
     // AMD reports a GPU hot spot where NVIDIA reports a memory junction;
     // show whichever exists and label it accordingly.
@@ -309,6 +314,114 @@
            padTo(fmt(junction !== null ? junction : hotspot, 0), 3));
     setText(gel(cardId, 'gpu-junction-unit'),
             (junction === null && hotspot !== null) ? 'hot spot' : 'junction');
+
+    setNum(gel(cardId, 'gpu-core-mhz'), padTo(fmt(gpu.core_mhz, 0), 4));
+    setNum(gel(cardId, 'gpu-mem-mhz'), padTo(fmt(gpu.mem_mhz, 0), 5));
+  }
+
+  // ---- cooling ------------------------------------------------------------
+
+  // Chips whose SET can change - a fan spinning up, a drive arriving - are
+  // rebuilt only when the set changes and updated in place otherwise, so
+  // nothing churns at 1 Hz. Same rule the drive chips have always followed.
+  function chipRow(rowId, items, label, keyOf) {
+    var row = $(rowId);
+    if (!row) return null;
+    items = items || [];
+    var key = items.map(keyOf).join(',');
+    if (row._key !== key) {
+      row.innerHTML = '';
+      row._parts = {};
+      items.forEach(function (item) {
+        var chip = document.createElement('span');
+        chip.className = 'chip';
+        var name = document.createElement('span');
+        name.textContent = label(item) + ' ';
+        var value = document.createElement('b');
+        var unit = document.createElement('span');
+        chip.appendChild(name);
+        chip.appendChild(value);
+        chip.appendChild(unit);
+        row.appendChild(chip);
+        row._parts[keyOf(item)] = { value: value, unit: unit };
+      });
+      row._key = key;
+    }
+    return row._parts || {};
+  }
+
+  function fanName(f) { return f.name; }
+
+  function paintCool(data) {
+    var board = data.board || [];
+    var fans = data.fans || [];
+
+    // The headline is the board's own System temperature - the one number that
+    // describes the inside of the case rather than one component in it.
+    var system = null;
+    for (var i = 0; i < board.length; i++) {
+      if (board[i].name === 'System') { system = board[i].temp_c; break; }
+    }
+    if (system === null && board.length) system = board[0].temp_c;
+    setValue($('cool-temp'), system, CASE_HEAT, 0, 3);
+
+    setText($('cool-sub'), fans.length
+      ? (fans.length === 1 ? '1 fan turning' : fans.length + ' fans turning')
+      : 'no fan readings - needs LibreHardwareMonitor');
+
+    // RPM, not the control percentage: a header commanded to 60% that reads 0
+    // is a dead fan, and that is the whole reason to show this row.
+    var fanParts = chipRow('fan-chips', fans, fanName, fanName);
+    if (fanParts) {
+      fans.forEach(function (f) {
+        var part = fanParts[f.name];
+        if (!part) return;
+        setNum(part.value, padTo(fmt(f.rpm, 0), 4));
+        setText(part.unit, ' rpm');
+      });
+    }
+
+    var boardParts = chipRow('board-chips', board, fanName, fanName);
+    if (boardParts) {
+      board.forEach(function (b) {
+        var part = boardParts[b.name];
+        if (!part) return;
+        setNum(part.value, padTo(fmt(b.temp_c, 0), 3));
+        setText(part.unit, '°C');
+      });
+    }
+  }
+
+  // ---- network ------------------------------------------------------------
+
+  // A rate is shown in whichever unit keeps it to a readable number of digits,
+  // so an idle link reads 1.1 KB/s and a busy one 118 MB/s rather than 120832.
+  function rateParts(bps) {
+    if (bps === null || bps === undefined) return { v: null, u: 'KB/s' };
+    if (bps >= 1048576) return { v: bps / 1048576, u: 'MB/s' };
+    return { v: bps / 1024, u: 'KB/s' };
+  }
+
+  function paintNet(data) {
+    var net = data.net;
+    if (!net) {
+      setText($('net-name'), 'no adapter readings - needs LibreHardwareMonitor');
+      return;
+    }
+    setText($('net-name'), net.name || ' ');
+
+    var down = rateParts(net.down_bps);
+    setValue($('net-down'), down.v, null, 1, 4);
+    setText($('net-down-unit'), down.u);
+
+    var up = rateParts(net.up_bps);
+    setNum($('net-up'), padTo(fmt(up.v, 1), 4));
+    setText($('net-up-unit'), up.u + ' up');
+
+    setNum($('net-util-text'), padTo(fmt(net.util, 0) + '%', 4));
+    setBar($('net-util-bar'), net.util);
+    setNum($('net-total-down'), padTo(fmt(net.down_gb, 1), 5));
+    setNum($('net-total-up'), padTo(fmt(net.up_gb, 1), 5));
   }
 
   // ---- painting -----------------------------------------------------------
@@ -399,6 +512,11 @@
       setNum($('ram-free'), padTo(fmt(ram.total_gb - ram.used_gb, 1), 4));
     }
 
+    setNum($('cpu-clock'), padTo(fmt(cpu.clock_mhz, 0), 4));
+    setNum($('cpu-power'), padTo(fmt(cpu.power_w, 0), 3));
+
+    paintCool(data);
+    paintNet(data);
     renderDisks(data.disks);
   }
 
@@ -424,12 +542,20 @@
         name.textContent = d.drive;
         var used = document.createElement('b');
         var total = document.createElement('span');
+        // Temperature and remaining life, when LHM could match this letter to
+        // a physical drive. Empty nodes otherwise, so the chip does not change
+        // width when a reading appears.
+        var temp = document.createElement('b');
+        var life = document.createElement('span');
         chip.appendChild(name);
         chip.appendChild(document.createTextNode(' '));
         chip.appendChild(used);
         chip.appendChild(total);
+        chip.appendChild(temp);
+        chip.appendChild(life);
         row.appendChild(chip);
-        diskParts[d.drive] = { used: used, total: total };
+        diskParts[d.drive] = { used: used, total: total,
+                               temp: temp, life: life };
       });
       row._key = key;
     }
@@ -439,6 +565,11 @@
       if (!p) return;
       setNum(p.used, padTo(fmt(d.used_gb, 0), 4));
       setNum(p.total, '/' + fmt(d.total_gb, 0));
+      // Only drives LHM can see have these, and a network share never will.
+      setNum(p.temp, (d.temp_c === null || d.temp_c === undefined)
+             ? '' : '  ' + fmt(d.temp_c, 0) + '°');
+      setText(p.life, (d.life === null || d.life === undefined || d.life >= 100)
+              ? '' : ' ' + fmt(d.life, 0) + '%');
     });
   }
 
@@ -1112,25 +1243,47 @@
   // fractions are rebuilt here rather than left to CSS.
   // Every GPU card shares the GPU's rows, weight and labels, so these stay
   // keyed by KIND while the ids themselves depend on how many GPUs there are.
-  var CARD_LABEL = { cpu: 'CPU', gpu: 'GPU', ram: 'Memory' };
+  var CARD_LABEL = { cpu: 'CPU', gpu: 'GPU', ram: 'Memory',
+                     cool: 'Cooling', net: 'Network' };
   // Portrait row weights: the GPU card carries more rows, so it gets more room.
-  var CARD_WEIGHT = { cpu: 0.78, gpu: 1.15, ram: 1.07 };
+  var CARD_WEIGHT = { cpu: 0.78, gpu: 1.15, ram: 1.07, cool: 0.95, net: 0.95 };
 
   var ROW_IDS = {
-    cpu: ['temp', 'load', 'cores'],
-    gpu: ['temp', 'load', 'vram', 'chips'],
-    ram: ['temp', 'load', 'free', 'drives']
+    cpu: ['temp', 'load', 'cores', 'clocks'],
+    gpu: ['temp', 'load', 'vram', 'chips', 'clocks'],
+    ram: ['temp', 'load', 'free', 'drives'],
+    cool: ['temp', 'fans', 'board'],
+    net: ['rate', 'load', 'totals']
   };
   var ROW_LABEL = {
-    cpu: { temp: 'Temperature', load: 'Load meter', cores: 'Per-core square' },
+    cpu: { temp: 'Temperature', load: 'Load meter', cores: 'Per-core square',
+           clocks: 'Clock / Package power' },
     gpu: { temp: 'Temperature', load: 'Load meter', vram: 'VRAM meter',
-           chips: 'Power / Fan / Junction' },
+           chips: 'Power / Fan / Junction', clocks: 'Core / Memory clock' },
     ram: { temp: 'Temperature', load: 'In-use meter', free: 'Free GB',
-           drives: 'Drive chips' }
+           drives: 'Drive chips' },
+    cool: { temp: 'System temperature', fans: 'Fan speeds',
+            board: 'Board temperature chips' },
+    net: { rate: 'Download speed', load: 'Utilisation meter',
+           totals: 'Upload and session totals' }
+  };
+
+  // What a fresh dashboard shows, and what a card gets when it is ticked back
+  // on. ROW_IDS is everything available; this is everything on by default.
+  // Mirrors DEFAULT_CARDS / DEFAULT_ROWS on the server - the page only uses
+  // these before the first poll and for the Reset button, but the two must
+  // agree or Reset would flip rows the server would then flip back.
+  var DEFAULT_CARDS = ['cpu', 'gpu', 'ram'];
+  var DEFAULT_ROWS = {
+    cpu: ['temp', 'load', 'cores'],
+    gpu: ['temp', 'load', 'vram', 'chips'],
+    ram: ['temp', 'load', 'free', 'drives'],
+    cool: ['temp', 'fans', 'board'],
+    net: ['rate', 'load', 'totals']
   };
 
   function cardIds() {
-    return ['cpu'].concat(gpuIds, ['ram']);
+    return ['cpu'].concat(gpuIds, ['ram', 'cool', 'net']);
   }
 
   function cardLabel(id) {
@@ -1140,9 +1293,18 @@
   function rowIds(id) {
     return ROW_IDS[kindOf(id)] || [];
   }
+
+  function defaultRows(id) {
+    return DEFAULT_ROWS[kindOf(id)] || [];
+  }
   function defaultLayout() {
-    return cardIds().map(function (id) {
-      return { id: id, rows: rowIds(id).slice() };
+    return cardIds().filter(function (id) {
+      // Only the first GPU, and none of the cards that are offered rather
+      // than shown.
+      if (isGpu(id)) return id === 'gpu';
+      return DEFAULT_CARDS.indexOf(id) !== -1;
+    }).map(function (id) {
+      return { id: id, rows: defaultRows(id).slice() };
     });
   }
 
@@ -1171,10 +1333,29 @@
     // minmax(0, Xfr) everywhere: a bare fr is minmax(auto, fr) and a wide
     // min-content would break the equal columns / fixed rows.
     if (window.matchMedia('(max-aspect-ratio: 1/1)').matches) {
-      cards.style.gridTemplateColumns = 'minmax(0, 1fr)';
-      cards.style.gridTemplateRows = visible.map(function (id) {
-        return 'minmax(0, ' + (CARD_WEIGHT[kindOf(id)] || 1) + 'fr)';
-      }).join(' ');
+      if (visible.length > 4) {
+        // Six cards stacked in portrait leave each about 150px, which clips the
+        // meters and chips. Two columns instead - the card puts its number
+        // beside its meters, so it reads fine at half width and would rather
+        // have the height.
+        cards.style.gridTemplateColumns = 'repeat(2, minmax(0, 1fr))';
+        cards.style.gridTemplateRows =
+          'repeat(' + Math.ceil(visible.length / 2) + ', minmax(0, 1fr))';
+      } else {
+        cards.style.gridTemplateColumns = 'minmax(0, 1fr)';
+        cards.style.gridTemplateRows = visible.map(function (id) {
+          return 'minmax(0, ' + (CARD_WEIGHT[kindOf(id)] || 1) + 'fr)';
+        }).join(' ');
+      }
+      cards.style.gridAutoRows = '0';
+    } else if (visible.length > 4) {
+      // Five or six cards in one row gives each about 170px on the iPad, which
+      // is narrower than the headline number. Two rows instead: still explicit
+      // fractions, so the columns stay equal and the numbers still cannot jump.
+      var cols = Math.ceil(visible.length / 2);
+      cards.style.gridTemplateColumns =
+        'repeat(' + cols + ', minmax(0, 1fr))';
+      cards.style.gridTemplateRows = 'repeat(2, minmax(0, 1fr))';
       cards.style.gridAutoRows = '0';
     } else {
       cards.style.gridTemplateColumns =
@@ -1254,7 +1435,7 @@
         if (isGpu(c.id)) at = i + 1;
       });
     }
-    var entry = { id: id, rows: rowIds(id).slice() };
+    var entry = { id: id, rows: defaultRows(id).slice() };
     if (at < 0) layoutState.push(entry);
     else layoutState.splice(at, 0, entry);
     saveLayout();
