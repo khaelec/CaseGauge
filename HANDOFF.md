@@ -582,6 +582,58 @@ whether the card is spinning up, not which individual fan is doing it.
 
 ---
 
+## v1.6: the tablet could not start a video, and said so to nobody
+
+Reported as "the wallpapers no longer load" plus "it keeps dropping the
+connection and reconnecting". The tablet was in fact fine, and its own words
+gave it away: the hint line read **"tap to start"**.
+
+That string had exactly one source - `playVideo()`'s rejection handler - and a
+grep for tap handlers found that **nothing anywhere listened for the tap**. The
+one `touchend` listener in `app.js` re-arms the wake lock. So on any browser that
+refuses muted autoplay the message was a promise nothing kept, and the wallpaper
+never appeared. Safari on the iPad allows the autoplay, which is why this
+survived until a second device arrived.
+
+`tryPlay()` now owns every attempt, sets `video.muted` as a **property** (the
+autoplay policy tests the property, and `load()` has been called on the element
+since the markup was parsed), and on rejection sets `awaitingTap`. A one-shot
+gesture handler on touchend/pointerdown/click/keydown retries inside the gesture,
+and a `playing` listener clears the prompt and the failure count.
+
+**Testing it needed care.** Stubbing `HTMLMediaElement.prototype.play` to reject
+is not enough: the element carries `autoplay` in the markup, so headless Chromium
+starts the video by itself regardless of the stubbed method, fires `playing`, and
+clears the very prompt under test - which reads exactly like the fix not working.
+Remove the attribute in the test and the device's behaviour is reproduced
+faithfully. Proof, in order: `preparing...`, ``, `tap the screen to start ...`,
+then a second `play()` tagged `gesture`, then the prompt cleared.
+
+**The reconnecting was real too, and separate.** Two causes:
+
+- The video error handler retried every two seconds for ever, and each retry
+  re-downloads the file. A client that cannot decode it spends all its time
+  fetching a video it will never play, and its 1 Hz poll goes late - which the
+  page reports as losing the server. Now four tries with a widening gap, then a
+  message.
+- `socketserver`'s default accept backlog is **5**, and this server never raised
+  it. Every request is its own connection (HTTP/1.0, `Connection: close`), so
+  three viewers at 1 Hz plus one page load - index, css, two scripts, poster
+  images, a video with Range requests - bursts well past five. An overflowed
+  backlog drops the SYN and the client waits out a retransmit timeout. It was
+  visible as SYN_RECEIVED piling up against the port from the third device
+  specifically. `request_queue_size = 128` now.
+
+**HTTP/1.1 keep-alive was considered and declined.** It would cut connections by
+roughly the poll rate, but two paths in `_serve_file` are not keep-alive safe: the
+416 branch sent no `Content-Length` (fixed here anyway), and the body loop
+`return`s on BrokenPipeError having written fewer bytes than it promised, which
+desyncs a reused connection. Closing per request is what makes that abort
+harmless, and Safari aborting a seek is normal traffic here. Raising the backlog
+buys most of the benefit for none of the risk.
+
+---
+
 ## Not started, but discussed
 
 - **Video wallpaper sharpness.** `TARGET_HEIGHT = 768` in `wallpapers.py` was

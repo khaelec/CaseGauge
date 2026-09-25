@@ -1597,6 +1597,7 @@ class Handler(SimpleHTTPRequestHandler):
                 if start >= size or start > end:
                     self.send_response(416)
                     self.send_header("Content-Range", "bytes */%d" % size)
+                    self.send_header("Content-Length", "0")
                     self.end_headers()
                     return
                 partial = True
@@ -1842,6 +1843,15 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 class Server(ThreadingHTTPServer):
+    # socketserver's default accept backlog is 5, which is too small here. Every
+    # request is its own connection (HTTP/1.0, Connection: close), so three
+    # viewers polling at 1 Hz plus a page load - index, css, two scripts, the
+    # poster images, a video with Range requests - arrives in bursts well past
+    # five. An overflowed backlog DROPS the SYN, the client waits out a retransmit
+    # timeout, and the dashboard reports it as losing the server. Seen as
+    # SYN_RECEIVED piling up against this port with a third device connected.
+    request_queue_size = 128
+
     # HTTPServer defaults allow_reuse_address on, which on Windows lets a
     # second process bind a port that is already being listened on - both
     # instances then accept connections and the dashboard sees alternating

@@ -256,6 +256,41 @@ window.Wallpaper = (function () {
 
   // ---- video -------------------------------------------------------------
 
+  // Chrome on Android refuses even muted autoplay on some devices - Data Saver
+  // and a low media-engagement score both do it - and the old code answered
+  // that by printing "tap to start", which was a promise nothing kept: no tap
+  // handler existed anywhere. Safari on the iPad allows the autoplay, which is
+  // why it was never seen there. Now the message is true.
+  var awaitingTap = false;
+  var videoTries = 0;
+
+  function tryPlay(title) {
+    // The autoplay policy tests the muted PROPERTY, not just the attribute in
+    // the markup, and load() has been called on this element since.
+    video.muted = true;
+    var p = video.play();
+    if (!p || !p.then) {            // old browsers return nothing
+      awaitingTap = false;
+      return;
+    }
+    p.then(function () {
+      awaitingTap = false;
+    }).catch(function () {
+      awaitingTap = true;
+      onStatus('tap the screen to start ' + (title || 'the wallpaper'));
+    });
+  }
+
+  function playOnGesture() {
+    if (!awaitingTap || current.mode !== 'video') return;
+    // Inside a real user gesture, so this attempt is allowed to succeed.
+    tryPlay(current.title);
+  }
+
+  ['touchend', 'pointerdown', 'click', 'keydown'].forEach(function (evt) {
+    document.addEventListener(evt, playOnGesture, { passive: true });
+  });
+
   function playVideo(item) {
     // Ask the server to transcode it, then poll until the file exists.
     onStatus('preparing ' + item.title + '...');
@@ -282,10 +317,7 @@ window.Wallpaper = (function () {
             onStatus('');
             video.hidden = false;
             video.src = '/media/' + item.id + '/video';
-            var p = video.play();
-            if (p && p.catch) p.catch(function () {
-              onStatus('tap to start ' + item.title);
-            });
+            tryPlay(item.title);
             return;
           }
           if (st.state === 'error') {
@@ -348,8 +380,7 @@ window.Wallpaper = (function () {
         apply(current);      // came back broken - rebuild it from scratch
         return;
       }
-      var p = video.play();
-      if (p && p.catch) p.catch(function () {});
+      tryPlay(current.title);
     } else if (current.mode === 'web' && !frame.getAttribute('src')) {
       apply(current);
     }
@@ -369,8 +400,27 @@ window.Wallpaper = (function () {
   window.addEventListener('pageshow', resume);
   window.addEventListener('focus', resume);
 
+  // A video that will not play gets a few tries with a widening gap rather than
+  // one every two seconds for ever. Each try re-downloads the file, and on a
+  // weak client that is enough to starve the 1 Hz poll - which shows up as the
+  // dashboard constantly losing and regaining the server, with the wallpaper as
+  // the actual cause.
   video.addEventListener('error', function () {
-    if (current.mode === 'video') setTimeout(function () { apply(current); }, 2000);
+    if (current.mode !== 'video') return;
+    videoTries++;
+    if (videoTries > 4) {
+      onStatus('this browser could not play ' + (current.title || 'that video'));
+      return;
+    }
+    setTimeout(function () { apply(current); }, 2000 * videoTries);
+  });
+
+  // Whatever we were waiting for has happened: stop asking for a tap and stop
+  // counting failures.
+  video.addEventListener('playing', function () {
+    awaitingTap = false;
+    videoTries = 0;
+    onStatus('');
   });
 
   // A still that will not load has almost always been deleted or renamed in

@@ -678,6 +678,23 @@ Android's Home Screen install would want a `manifest.json`, which is not shipped
 (the page uses the iOS `apple-touch-icon`). The dashboard still runs fine
 without one.
 
+### Video wallpapers and autoplay
+
+Chrome on Android refuses to start a video without a user gesture on some
+devices - Data Saver does it, and so does a low media-engagement score - even
+when the video is muted, which is the case Safari allows. When that happens the
+hint line asks you to **tap the screen**, and tapping anywhere now starts it.
+
+Before v1.6 that message was printed and nothing listened for the tap, so on
+such a device the wallpaper simply never appeared. Safari on the iPad allows the
+autoplay, which is why it went unnoticed.
+
+A video that will not decode at all is retried four times with a widening gap
+and then left alone with a message saying so. It used to retry every two seconds
+for ever, and since each attempt re-downloads the file, a device that could not
+play it would starve its own 1 Hz poll - which looked like the dashboard
+constantly losing and regaining the server.
+
 ### Old tablets (Chrome 85 / Android 5)
 
 An old tablet is a perfectly good second panel, and the dashboard works on one -
