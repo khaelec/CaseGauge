@@ -254,6 +254,57 @@ window.Wallpaper = (function () {
     clearImage();
   }
 
+  // ---- reporting a failure the PC cannot see ------------------------------
+
+  // A tablet has no console anyone can reach, and "the wallpaper does not play"
+  // is invisible from the server side: the file was served, status 200, done.
+  // So the page says what happened, both on screen and into diag.log beside the
+  // app. Once per wallpaper per stage, so a retry loop cannot flood it.
+  var reported = {};
+
+  function canPlay(type) {
+    try {
+      return video.canPlayType(type) || 'no';
+    } catch (e) {
+      return 'threw';
+    }
+  }
+
+  function reportVideo(stage, err) {
+    var key = keyOf(current) + ':' + stage;
+    if (reported[key]) return;
+    reported[key] = true;
+    try {
+      fetch('/api/diag', {
+        method: 'POST',
+        body: JSON.stringify({
+          wallpaper: { stage: stage, id: current.id, title: current.title },
+          ua: navigator.userAgent,
+          err: err ? { name: err.name || '?', message: String(err.message || err) }
+                   : null,
+          media: {
+            error: video.error
+              ? { code: video.error.code, message: video.error.message } : null,
+            muted: video.muted, paused: video.paused,
+            readyState: video.readyState, networkState: video.networkState,
+            w: video.videoWidth, h: video.videoHeight,
+            src: (video.currentSrc || '').slice(-60)
+          },
+          // Which H.264 profiles this decoder will admit to. The transcode
+          // currently produces High; if only baseline and main come back
+          // "probably", that is the answer.
+          canPlay: {
+            mp4: canPlay('video/mp4'),
+            baseline: canPlay('video/mp4; codecs="avc1.42E01E"'),
+            main: canPlay('video/mp4; codecs="avc1.4D401F"'),
+            high40: canPlay('video/mp4; codecs="avc1.640028"'),
+            high31: canPlay('video/mp4; codecs="avc1.64001F"')
+          }
+        })
+      }).catch(function () {});
+    } catch (e) { /* older Safari without fetch bodies: on-screen text only */ }
+  }
+
   // ---- video -------------------------------------------------------------
 
   // Chrome on Android refuses even muted autoplay on some devices - Data Saver
@@ -263,8 +314,10 @@ window.Wallpaper = (function () {
   // why it was never seen there. Now the message is true.
   var awaitingTap = false;
   var videoTries = 0;
+  var abortTries = 0;
+  var lastRebuild = 0;
 
-  function tryPlay(title) {
+  function tryPlay(title, fromGesture) {
     // The autoplay policy tests the muted PROPERTY, not just the attribute in
     // the markup, and load() has been called on this element since.
     video.muted = true;
@@ -275,16 +328,47 @@ window.Wallpaper = (function () {
     }
     p.then(function () {
       awaitingTap = false;
-    }).catch(function () {
+    }).catch(function (err) {
+      var name = (err && err.name) || 'blocked';
+
+      // AbortError is not a refusal. It means the play was interrupted - the
+      // element was reloaded or paused underneath it - so asking for a tap would
+      // be answering the wrong question. Let it settle and try again, a few
+      // times, quietly.
+      if (name === 'AbortError') {
+        abortTries++;
+        if (abortTries <= 5) {
+          setTimeout(function () {
+            if (current.mode === 'video' && video.paused) tryPlay(title);
+          }, 600);
+          return;
+        }
+        onStatus('could not start ' + (title || 'the wallpaper') +
+                 ' - it keeps being interrupted');
+        reportVideo('abort', err);
+        return;
+      }
+
+      if (fromGesture) {
+        // A tap already happened and it still will not play, so this is not the
+        // autoplay policy. Name it on screen rather than asking for another tap
+        // that cannot help: NotSupportedError means the decoder, not permission.
+        awaitingTap = false;
+        onStatus('this browser will not play that video (' + name + ')');
+        reportVideo('gesture', err);
+        return;
+      }
       awaitingTap = true;
-      onStatus('tap the screen to start ' + (title || 'the wallpaper'));
+      onStatus('tap the screen to start ' + (title || 'the wallpaper') +
+               ' (' + name + ')');
+      reportVideo('autoplay', err);
     });
   }
 
   function playOnGesture() {
     if (!awaitingTap || current.mode !== 'video') return;
     // Inside a real user gesture, so this attempt is allowed to succeed.
-    tryPlay(current.title);
+    tryPlay(current.title, true);
   }
 
   ['touchend', 'pointerdown', 'click', 'keydown'].forEach(function (evt) {
@@ -376,8 +460,23 @@ window.Wallpaper = (function () {
       // startShader re-creates the context if it was lost.
       startShader();
     } else if (current.mode === 'video') {
-      if (video.error || video.readyState === 0) {
-        apply(current);      // came back broken - rebuild it from scratch
+      // readyState 0 is NOT proof of a broken video: it is also exactly what one
+      // that is still loading looks like. Rebuilding then calls pause() and
+      // load() on an element with a play() in flight, which rejects that play
+      // with AbortError and starts the cycle over - and since resume() runs on
+      // focus, the tap asking it to start was itself triggering the teardown
+      // that stopped it. Only a real error, or nothing loaded and nothing being
+      // loaded, counts as broken.
+      var loading = video.networkState === 2;        // NETWORK_LOADING
+      if (video.error || (video.readyState === 0 && !loading)) {
+        // And not more than once every few seconds, however many focus and
+        // visibility events the browser sends: each rebuild re-downloads the
+        // file, which is enough on a weak client to starve the 1 Hz poll and
+        // make the dashboard look like it keeps losing the server.
+        if (Date.now() - lastRebuild > 3000) {
+          lastRebuild = Date.now();
+          apply(current);
+        }
         return;
       }
       tryPlay(current.title);
@@ -408,8 +507,12 @@ window.Wallpaper = (function () {
   video.addEventListener('error', function () {
     if (current.mode !== 'video') return;
     videoTries++;
+    reportVideo('decode', null);
     if (videoTries > 4) {
-      onStatus('this browser could not play ' + (current.title || 'that video'));
+      var code = video.error ? video.error.code : 0;
+      onStatus('this browser could not play ' +
+               (current.title || 'that video') +
+               (code ? ' (media error ' + code + ')' : ''));
       return;
     }
     setTimeout(function () { apply(current); }, 2000 * videoTries);
@@ -420,6 +523,7 @@ window.Wallpaper = (function () {
   video.addEventListener('playing', function () {
     awaitingTap = false;
     videoTries = 0;
+    abortTries = 0;
     onStatus('');
   });
 

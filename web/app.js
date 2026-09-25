@@ -1109,7 +1109,14 @@
   // does not reproduce in headless Chromium, so the page has to be the one
   // that measures it. Cheap: four rects per frame, and it only reports when
   // something actually moved, at most once a minute.
+  // Behind ?debug=1 since v1.7. It forces a layout for each of twenty elements
+  // on every animation frame, which is around 1200 forced layouts a second - it
+  // found the jitter it was written for on a fast panel, but on an old tablet it
+  // starves the main thread badly enough that the 1 Hz poll lands late and the
+  // status flips between live and reconnecting as the numbers change. The tool
+  // is worth keeping; leaving it switched on for every viewer is not.
   (function watchShifts() {
+    if (!/[?&]debug=1/.test(location.search)) return;
     // Track HEIGHTS too: the tops told us everything shifts by a multiple of
     // ~24.9px, which means something is changing height and the effect
     // accumulates down the page. This finds which element it is.

@@ -680,6 +680,13 @@ without one.
 
 ### Video wallpapers and autoplay
 
+If a video wallpaper will not start, the hint line under the cards now names the
+reason in brackets, and the same detail is appended to `diag.log` beside the app -
+`NotAllowedError` is the browser's autoplay policy and a tap fixes it,
+`NotSupportedError` or a media error is the decoder, and `AbortError` means
+something interrupted the start.
+
+
 Chrome on Android refuses to start a video without a user gesture on some
 devices - Data Saver does it, and so does a low media-engagement score - even
 when the video is muted, which is the case Safari allows. When that happens the

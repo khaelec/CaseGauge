@@ -634,6 +634,66 @@ buys most of the benefit for none of the risk.
 
 ---
 
+## v1.7: the tap was causing the abort that stopped the video
+
+v1.6 made "tap to start" real, and on the tablet the tap then produced
+**AbortError**. That is not a refusal and not a codec problem: `play()` rejects
+with AbortError when something interrupts it - a `pause()`, or a reload of the
+element - while it is in flight.
+
+`resume()` was the interrupter:
+
+```js
+if (video.error || video.readyState === 0) apply(current);   // "came back broken"
+```
+
+`readyState === 0` is HAVE_NOTHING, which is also **exactly what a video that is
+still loading looks like**. `resume()` runs on `visibilitychange`, `pageshow` and
+**`focus`** - and a tap raises focus. So the tap called resume(), resume() decided
+a still-loading video was broken, `apply()` tore it down through `clearVideo()`
+(`pause()` + `removeAttribute('src')` + `load()`), and the play() the tap had just
+started rejected with AbortError. The user's own words were the clue: "it tried
+to".
+
+Fixed three ways:
+
+- `resume()` only rebuilds on a real `video.error`, or on readyState 0 with
+  `networkState !== NETWORK_LOADING`. Still loading is not broken.
+- A rebuild happens at most once every three seconds however many focus and
+  visibility events arrive. Each rebuild re-downloads the file, and on a weak
+  client that alone starves the 1 Hz poll.
+- AbortError no longer asks for a tap. It retries quietly up to five times and
+  only then says it keeps being interrupted.
+
+Measured: eight `focus` events fired during the load produce **one** `load()` and
+one `pause()`, no AbortError, and the video reaches readyState 4 playing. Before,
+each of those eight tore the element down.
+
+**The layout-shift watchdog is now behind `?debug=1`.** It called
+`getBoundingClientRect()` on twenty elements every animation frame, for ever -
+roughly 1200 forced layouts a second. It found the jitter it was written for, but
+on the tablet it starves the main thread enough that the 1 Hz poll lands late and
+the status flips live/reconnecting as the numbers change, which is precisely what
+the user reported. Keep the tool, stop running it for every viewer.
+
+**Wallpaper failures now report themselves.** `reportVideo()` POSTs the play
+rejection name, `video.error.code`, readyState/networkState, the decoded size and
+`canPlayType()` for baseline/main/high to `/api/diag`, once per wallpaper per
+stage. A tablet has no console anyone can reach and the server sees only a
+successful file transfer, so without this the next failure is another round of
+guessing.
+
+**Still unproven, and the next thing to look at if video fails again.** The
+transcode produces widths that are not multiples of 16 - measured 1366x768 for a
+16:9 source and 1922x768 for an ultrawide one - in High profile with 2 B-frames.
+Old Android hardware decoders commonly require macroblock-aligned width, and 1366
+is the classic case. If diag.log comes back with `high40: ""` or a media error 3
+or 4, the fix is `scale=-16:768` plus `-profile:v main -bf 0` in `_transcode()`,
+and a cache key change so existing files are re-encoded. Not done on a hypothesis:
+it re-transcodes everything and the AbortError above explained the symptom.
+
+---
+
 ## Not started, but discussed
 
 - **Video wallpaper sharpness.** `TARGET_HEIGHT = 768` in `wallpapers.py` was
